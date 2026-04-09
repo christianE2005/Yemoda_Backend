@@ -1,0 +1,196 @@
+from django.db import models
+
+
+class UserAccount(models.Model):
+    id_user = models.BigAutoField(primary_key=True)
+    email = models.EmailField(max_length=150, unique=True)
+    username = models.CharField(max_length=100)
+    password_hash = models.CharField(max_length=255)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "user_account"
+
+
+class Project(models.Model):
+    id_project = models.BigAutoField(primary_key=True)
+    name = models.CharField(max_length=150)
+    description = models.TextField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    end_date = models.DateField(null=True, blank=True)
+    status = models.CharField(max_length=50, null=True, blank=True)
+    created_by = models.ForeignKey(
+        UserAccount,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        db_column="created_by",
+        related_name="projects_created",
+    )
+
+    class Meta:
+        db_table = "project"
+
+
+class Role(models.Model):
+    id_role = models.BigAutoField(primary_key=True)
+    name = models.CharField(max_length=50, unique=True)
+    description = models.TextField(null=True, blank=True)
+
+    class Meta:
+        db_table = "role"
+
+
+class ProjectMember(models.Model):
+    id = models.BigAutoField(primary_key=True)
+    user = models.ForeignKey(
+        UserAccount,
+        on_delete=models.CASCADE,
+        db_column="id_user",
+        related_name="project_memberships",
+    )
+    project = models.ForeignKey(
+        Project,
+        on_delete=models.CASCADE,
+        db_column="id_project",
+        related_name="members",
+    )
+    role = models.ForeignKey(
+        Role,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        db_column="id_role",
+        related_name="project_members",
+    )
+    joined_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "project_member"
+        unique_together = ("user", "project")
+
+
+class Board(models.Model):
+    id_board = models.BigAutoField(primary_key=True)
+    project = models.ForeignKey(
+        Project,
+        on_delete=models.CASCADE,
+        db_column="id_project",
+        related_name="boards",
+    )
+    name = models.CharField(max_length=150)
+    description = models.TextField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "board"
+
+
+class TaskStatus(models.Model):
+    id_status = models.BigAutoField(primary_key=True)
+    name = models.CharField(max_length=50, unique=True)
+    description = models.TextField(null=True, blank=True)
+
+    class Meta:
+        db_table = "task_status"
+
+
+class TaskPriority(models.Model):
+    id_priority = models.BigAutoField(primary_key=True)
+    name = models.CharField(max_length=50, unique=True)
+    level = models.IntegerField()
+
+    class Meta:
+        db_table = "task_priority"
+
+
+class Task(models.Model):
+    id_task = models.BigAutoField(primary_key=True)
+    board = models.ForeignKey(
+        Board,
+        on_delete=models.CASCADE,
+        db_column="id_board",
+        related_name="tasks",
+    )
+    title = models.CharField(max_length=200)
+    description = models.TextField(null=True, blank=True)
+    status = models.ForeignKey(
+        TaskStatus,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        db_column="id_status",
+        related_name="tasks",
+    )
+    priority = models.ForeignKey(
+        TaskPriority,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        db_column="id_priority",
+        related_name="tasks",
+    )
+    created_by = models.ForeignKey(
+        UserAccount,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        db_column="created_by",
+        related_name="tasks_created",
+    )
+    assigned_to = models.ForeignKey(
+        UserAccount,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        db_column="assigned_to",
+        related_name="tasks_assigned",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    due_date = models.DateField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "task"
+
+
+class TaskComment(models.Model):
+    id_comment = models.BigAutoField(primary_key=True)
+    task = models.ForeignKey(
+        Task,
+        on_delete=models.CASCADE,
+        db_column="id_task",
+        related_name="comments",
+    )
+    user = models.ForeignKey(
+        UserAccount,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        db_column="id_user",
+        related_name="task_comments",
+    )
+    content = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "task_comment"
+
+
+class ActivityLog(models.Model):
+    id_activity = models.BigAutoField(primary_key=True)
+    user = models.ForeignKey(
+        UserAccount,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        db_column="id_user",
+        related_name="activities",
+    )
+    entity_type = models.CharField(max_length=50, null=True, blank=True)
+    entity_id = models.IntegerField(null=True, blank=True)
+    action = models.CharField(max_length=100, null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "activity_log"
