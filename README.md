@@ -92,7 +92,7 @@ Swagger/OpenAPI:
 - `POST /api/github/repos/`
   - Crea repositorio desde la app:
     - `owner_type="user"`: usa token OAuth del usuario.
-    - `owner_type="org"`: usa token de instalacion GitHub App.
+    - `owner_type="org"`: usa token de instalacion GitHub App y si no hay vinculacion previa intenta resolver automaticamente la instalacion por organizacion.
   - Tambien agrega webhook de `push`.
 - `POST /api/github/webhook/push/`
   - Receptor de webhook. Valida firma y devuelve resumen de cambios en commits.

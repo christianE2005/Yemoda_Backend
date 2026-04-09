@@ -120,6 +120,47 @@ def _installation_access_token(installation_id: int) -> str:
     return token
 
 
+def _resolve_org_installation_for_user(user: UserAccount, org_login: str) -> int:
+    github_connection = GithubConnection.objects.filter(user=user).first()
+    if not github_connection:
+        raise ValueError("El usuario no tiene GitHub conectado.")
+
+    membership_response = requests.get(
+        f"{GITHUB_API_URL}/user/memberships/orgs/{org_login}",
+        headers=_github_headers(github_connection.access_token),
+        timeout=20,
+    )
+    if membership_response.status_code >= 400:
+        raise ValueError("El usuario no pertenece a la organizacion solicitada.")
+    membership = membership_response.json()
+    if membership.get("state") != "active":
+        raise ValueError("La membresia del usuario en la organizacion no esta activa.")
+
+    installations_response = requests.get(
+        f"{GITHUB_API_URL}/app/installations",
+        headers=_github_app_headers(),
+        timeout=20,
+    )
+    if installations_response.status_code >= 400:
+        raise ValueError("No se pudieron consultar las instalaciones de GitHub App.")
+
+    installations = installations_response.json()
+    for installation in installations:
+        account = installation.get("account") or {}
+        if account.get("login", "").lower() == org_login.lower():
+            install_obj, _ = GithubAppInstallation.objects.update_or_create(
+                installation_id=installation["id"],
+                defaults={
+                    "account_login": account.get("login", org_login),
+                    "account_type": account.get("type"),
+                    "user": user,
+                },
+            )
+            return install_obj.installation_id
+
+    raise ValueError("La GitHub App no esta instalada en esa organizacion.")
+
+
 class UserAccountViewSet(viewsets.ModelViewSet):
     queryset = UserAccount.objects.all()
     serializer_class = UserAccountSerializer
@@ -473,13 +514,17 @@ class GithubCreateRepoView(APIView):
             if not installation_id:
                 linked = GithubAppInstallation.objects.filter(user=user, account_login=owner).first()
                 installation_id = linked.installation_id if linked else None
-            if not installation_id:
-                return Response(
-                    {"detail": "No hay instalacion vinculada. Usa /api/github/app/install/link/ con installation_id."},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
+            if isinstance(installation_id, int) and installation_id > 0:
+                resolved_installation_id = installation_id
+            else:
+                resolved_installation_id = None
+            if not resolved_installation_id:
+                try:
+                    resolved_installation_id = _resolve_org_installation_for_user(user=user, org_login=owner)
+                except ValueError as exc:
+                    return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
             try:
-                token = _installation_access_token(installation_id)
+                token = _installation_access_token(resolved_installation_id)
             except ValueError as exc:
                 return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
             auth_headers = _github_headers(token)
