@@ -194,3 +194,41 @@ class ActivityLog(models.Model):
 
     class Meta:
         db_table = "activity_log"
+
+
+class GithubConnection(models.Model):
+    id_connection = models.BigAutoField(primary_key=True)
+    user = models.OneToOneField(
+        UserAccount,
+        on_delete=models.CASCADE,
+        db_column="id_user",
+        related_name="github_connection",
+    )
+    github_user_id = models.BigIntegerField(unique=True)
+    github_login = models.CharField(max_length=150)
+    access_token = models.CharField(max_length=255)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "github_connection"
+
+
+class GithubAppInstallation(models.Model):
+    id_installation = models.BigAutoField(primary_key=True)
+    installation_id = models.BigIntegerField(unique=True)
+    account_login = models.CharField(max_length=150)
+    account_type = models.CharField(max_length=50, null=True, blank=True)
+    user = models.ForeignKey(
+        UserAccount,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        db_column="id_user",
+        related_name="github_app_installations",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "github_app_installation"

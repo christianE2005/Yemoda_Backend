@@ -42,6 +42,14 @@ Variables principales:
 - `JWT_ALGORITHM` (usar `HS256` para el setup actual)
 - `JWT_EXPIRE_MINUTES`
 - `JWT_REFRESH_EXPIRE_MINUTES`
+- `GITHUB_APP_ID`
+- `GITHUB_APP_SLUG`
+- `GITHUB_APP_CLIENT_ID`
+- `GITHUB_APP_CLIENT_SECRET`
+- `GITHUB_APP_OAUTH_CALLBACK_URL`
+- `GITHUB_APP_PRIVATE_KEY`
+- `GITHUB_APP_WEBHOOK_SECRET`
+- `GITHUB_APP_WEBHOOK_TARGET_URL`
 
 ### Levantar Django
 
@@ -65,6 +73,29 @@ Swagger/OpenAPI:
 - `POST /api/auth/register/`
 - `POST /api/auth/login/`
 - `POST /api/auth/refresh/`
+
+### GitHub App + repos + webhook (Django)
+
+- `GET /api/github/app/install/start/`
+  - Regresa URL para instalar tu GitHub App en cuenta/org.
+- `GET /api/github/app/oauth/start/`
+  - Regresa `authorize_url` para login del usuario via GitHub App OAuth.
+- `POST /api/github/app/oauth/callback/`
+  - Body: `{ "code": "...", "state": "..." }`
+  - Vincula usuario local con su cuenta GitHub.
+  - Tambien soporta callback GET para GitHub App y muestra texto simple:
+    - `OAuth completed successfully` o
+    - `OAuth failed: ...`
+- `POST /api/github/app/install/link/`
+  - Body: `{ "user_id": 1, "installation_id": 12345678 }`
+  - Vincula instalacion GitHub App con usuario local.
+- `POST /api/github/repos/`
+  - Crea repositorio desde la app:
+    - `owner_type="user"`: usa token OAuth del usuario.
+    - `owner_type="org"`: usa token de instalacion GitHub App.
+  - Tambien agrega webhook de `push`.
+- `POST /api/github/webhook/push/`
+  - Receptor de webhook. Valida firma y devuelve resumen de cambios en commits.
 
 #### Ejemplo register
 

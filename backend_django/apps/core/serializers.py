@@ -89,3 +89,25 @@ class LoginSerializer(serializers.Serializer):
 
 class RefreshSerializer(serializers.Serializer):
     refresh_token = serializers.CharField(write_only=True)
+
+
+class GithubOauthCallbackSerializer(serializers.Serializer):
+    code = serializers.CharField()
+    state = serializers.CharField()
+
+
+class GithubCreateRepoSerializer(serializers.Serializer):
+    user_id = serializers.IntegerField(min_value=1)
+    name = serializers.CharField(max_length=100)
+    description = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    private = serializers.BooleanField(default=True)
+    auto_init = serializers.BooleanField(default=True)
+    owner_type = serializers.ChoiceField(choices=["user", "org"], default="user")
+    owner = serializers.CharField(required=False, allow_blank=True)
+    installation_id = serializers.IntegerField(required=False, min_value=1)
+    webhook_url = serializers.URLField(required=False)
+
+
+class GithubAppLinkInstallationSerializer(serializers.Serializer):
+    user_id = serializers.IntegerField(min_value=1)
+    installation_id = serializers.IntegerField(min_value=1)

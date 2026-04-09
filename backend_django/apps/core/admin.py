@@ -3,6 +3,8 @@ from django.contrib import admin
 from .models import (
     ActivityLog,
     Board,
+    GithubAppInstallation,
+    GithubConnection,
     Project,
     ProjectMember,
     Role,
@@ -23,3 +25,5 @@ admin.site.register(TaskPriority)
 admin.site.register(Task)
 admin.site.register(TaskComment)
 admin.site.register(ActivityLog)
+admin.site.register(GithubConnection)
+admin.site.register(GithubAppInstallation)
