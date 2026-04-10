@@ -161,6 +161,24 @@ def _resolve_org_installation_for_user(user: UserAccount, org_login: str) -> int
     raise ValueError("La GitHub App no esta instalada en esa organizacion.")
 
 
+def _build_signed_oauth_state() -> str:
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+    payload = {
+        "nonce": secrets.token_urlsafe(24),
+        "exp": int(expires_at.timestamp()),
+        "purpose": "github_app_oauth",
+    }
+    return jwt.encode(payload, settings.GITHUB_APP_STATE_SECRET, algorithm="HS256")
+
+
+def _validate_signed_oauth_state(state: str) -> bool:
+    try:
+        payload = jwt.decode(state, settings.GITHUB_APP_STATE_SECRET, algorithms=["HS256"])
+    except jwt.InvalidTokenError:
+        return False
+    return payload.get("purpose") == "github_app_oauth"
+
+
 class UserAccountViewSet(viewsets.ModelViewSet):
     queryset = UserAccount.objects.all()
     serializer_class = UserAccountSerializer
@@ -326,8 +344,7 @@ class GithubAppOauthStartView(APIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
-        state = secrets.token_urlsafe(24)
-        request.session["github_app_oauth_state"] = state
+        state = _build_signed_oauth_state()
         params = {
             "client_id": settings.GITHUB_APP_CLIENT_ID,
             "redirect_uri": settings.GITHUB_APP_OAUTH_CALLBACK_URL,
@@ -342,10 +359,8 @@ class GithubAppOauthCallbackView(APIView):
 
     @extend_schema(request=GithubOauthCallbackSerializer, responses={200: dict, 400: dict, 500: dict}, tags=["github-app"])
     def _complete_oauth(self, request, code: str, state: str) -> tuple[dict | None, str | None, int]:
-        session_state = request.session.get("github_app_oauth_state")
-        if not session_state or not secrets.compare_digest(state, session_state):
+        if not _validate_signed_oauth_state(state):
             return None, "OAuth state invalido.", status.HTTP_400_BAD_REQUEST
-        request.session.pop("github_app_oauth_state", None)
 
         if not settings.GITHUB_APP_CLIENT_ID or not settings.GITHUB_APP_CLIENT_SECRET:
             return None, "Credenciales OAuth de GitHub App incompletas.", status.HTTP_500_INTERNAL_SERVER_ERROR

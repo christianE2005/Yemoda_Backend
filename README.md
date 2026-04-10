@@ -80,6 +80,7 @@ Swagger/OpenAPI:
   - Regresa URL para instalar tu GitHub App en cuenta/org.
 - `GET /api/github/app/oauth/start/`
   - Regresa `authorize_url` para login del usuario via GitHub App OAuth.
+  - Incluye `state` firmado (stateless), no depende de sesion del navegador.
 - `POST /api/github/app/oauth/callback/`
   - Body: `{ "code": "...", "state": "..." }`
   - Vincula usuario local con su cuenta GitHub.
