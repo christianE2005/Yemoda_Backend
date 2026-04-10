@@ -179,6 +179,25 @@ def _validate_signed_oauth_state(state: str) -> bool:
     return payload.get("purpose") == "github_app_oauth"
 
 
+def _user_from_bearer_token(request) -> UserAccount | None:
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        return None
+    token = auth_header.split(" ", 1)[1].strip()
+    if not token:
+        return None
+    try:
+        payload = jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
+    except jwt.InvalidTokenError:
+        return None
+    if payload.get("type") != "access":
+        return None
+    user_id = payload.get("sub")
+    if not user_id:
+        return None
+    return UserAccount.objects.filter(id_user=user_id).first()
+
+
 class UserAccountViewSet(viewsets.ModelViewSet):
     queryset = UserAccount.objects.all()
     serializer_class = UserAccountSerializer
@@ -357,7 +376,7 @@ class GithubAppOauthStartView(APIView):
 class GithubAppOauthCallbackView(APIView):
     permission_classes = [AllowAny]
 
-    @extend_schema(request=GithubOauthCallbackSerializer, responses={200: dict, 400: dict, 500: dict}, tags=["github-app"])
+    @extend_schema(request=GithubOauthCallbackSerializer, responses={200: dict, 400: dict, 401: dict, 500: dict}, tags=["github-app"])
     def _complete_oauth(self, request, code: str, state: str) -> tuple[dict | None, str | None, int]:
         if not _validate_signed_oauth_state(state):
             return None, "OAuth state invalido.", status.HTTP_400_BAD_REQUEST
@@ -387,43 +406,60 @@ class GithubAppOauthCallbackView(APIView):
         if user_response.status_code >= 400:
             return None, "No se pudo obtener usuario de GitHub.", status.HTTP_400_BAD_REQUEST
         github_user = user_response.json()
+        github_login = github_user.get("login")
+        github_user_id = github_user.get("id")
+        if not github_login or not github_user_id:
+            return None, "GitHub no devolvio datos validos de usuario.", status.HTTP_400_BAD_REQUEST
 
-        emails_response = requests.get(f"{GITHUB_API_URL}/user/emails", headers=_github_headers(access_token), timeout=20)
-        email = None
-        if emails_response.status_code < 400:
-            emails = emails_response.json()
-            primary = next((e for e in emails if e.get("primary") and e.get("verified")), None)
-            fallback = next((e for e in emails if e.get("verified")), None)
-            chosen = primary or fallback
-            if chosen:
-                email = chosen.get("email")
-        if not email:
-            email = github_user.get("email") or f"{github_user['login']}@users.noreply.github.com"
+        token_user = _user_from_bearer_token(request)
+        if request.method == "POST" and not token_user:
+            return None, "Authorization Bearer requerido para vincular GitHub al usuario actual.", status.HTTP_401_UNAUTHORIZED
 
-        username = github_user.get("login") or email.split("@")[0]
-        user = UserAccount.objects.filter(email=email).first()
-        if not user:
-            user = UserAccount.objects.create(
-                email=email,
-                username=username,
-                password_hash=make_password(None),
-            )
-        elif user.username != username:
-            user.username = username
-            user.save(update_fields=["username"])
+        user = token_user
+        if user:
+            if user.username != github_login:
+                user.username = github_login
+                user.save(update_fields=["username"])
+        else:
+            emails_response = requests.get(f"{GITHUB_API_URL}/user/emails", headers=_github_headers(access_token), timeout=20)
+            email = None
+            if emails_response.status_code < 400:
+                emails = emails_response.json()
+                primary = next((e for e in emails if e.get("primary") and e.get("verified")), None)
+                fallback = next((e for e in emails if e.get("verified")), None)
+                chosen = primary or fallback
+                if chosen:
+                    email = chosen.get("email")
+            if not email:
+                email = github_user.get("email") or f"{github_login}@users.noreply.github.com"
+
+            user = UserAccount.objects.filter(email=email).first()
+            if not user:
+                user = UserAccount.objects.create(
+                    email=email,
+                    username=github_login,
+                    password_hash=make_password(None),
+                )
+            elif user.username != github_login:
+                user.username = github_login
+                user.save(update_fields=["username"])
+
+        existing_connection = GithubConnection.objects.filter(github_user_id=github_user_id).first()
+        if existing_connection and existing_connection.user_id != user.id_user:
+            return None, "Esta cuenta de GitHub ya esta vinculada con otro usuario.", status.HTTP_400_BAD_REQUEST
 
         GithubConnection.objects.update_or_create(
             user=user,
             defaults={
-                "github_user_id": github_user["id"],
-                "github_login": github_user["login"],
+                "github_user_id": github_user_id,
+                "github_login": github_login,
                 "access_token": access_token,
             },
         )
 
         tokens = _issue_tokens(user)
         return (
-            {**tokens, "user": UserAccountSerializer(user).data, "github_login": github_user["login"]},
+            {**tokens, "user": UserAccountSerializer(user).data, "github_login": github_login},
             None,
             status.HTTP_200_OK,
         )

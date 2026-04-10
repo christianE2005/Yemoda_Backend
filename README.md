@@ -83,7 +83,7 @@ Swagger/OpenAPI:
   - Incluye `state` firmado (stateless), no depende de sesion del navegador.
 - `POST /api/github/app/oauth/callback/`
   - Body: `{ "code": "...", "state": "..." }`
-  - Vincula usuario local con su cuenta GitHub.
+  - Requiere `Authorization: Bearer <access_token>` y vincula GitHub al usuario autenticado de tu app.
   - Tambien soporta callback GET para GitHub App y muestra texto simple:
     - `OAuth completed successfully` o
     - `OAuth failed: ...`
