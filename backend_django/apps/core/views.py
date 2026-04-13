@@ -10,8 +10,11 @@ import requests
 from django.conf import settings
 from django.contrib.auth.hashers import check_password, make_password
 from django.http import HttpResponse
+from django.db import models
+from django.db.models import Q
 from drf_spectacular.utils import extend_schema
 from rest_framework import status, viewsets
+from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -207,6 +210,23 @@ class ProjectViewSet(viewsets.ModelViewSet):
     queryset = Project.objects.all()
     serializer_class = ProjectSerializer
 
+    def get_queryset(self):
+        """Filter projects to show only those where the user is a member or the creator."""
+        user = self.request.user
+        return Project.objects.filter(
+            Q(members__user=user) | Q(created_by=user)
+        ).distinct()
+
+    def perform_create(self, serializer):
+        """Automatically set the creator and add them as a member of the project."""
+        project = serializer.save(created_by=self.request.user)
+        # Create membership record for the creator (Simplified approach: role=None)
+        ProjectMember.objects.get_or_create(
+            project=project,
+            user=self.request.user,
+            defaults={"role": None}
+        )
+
 
 class RoleViewSet(viewsets.ModelViewSet):
     queryset = Role.objects.all()
@@ -217,10 +237,42 @@ class ProjectMemberViewSet(viewsets.ModelViewSet):
     queryset = ProjectMember.objects.all()
     serializer_class = ProjectMemberSerializer
 
+    def perform_create(self, serializer):
+        """Prevent adding a user who is already the project creator."""
+        project = serializer.validated_data.get('project')
+        user = serializer.validated_data.get('user')
+        if project and user and project.created_by_id == user.pk:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError("El creador del proyecto ya es miembro por defecto.")
+        serializer.save()
+
+    def get_queryset(self):
+        """Filter members to the requested project (if ?project= provided), scoped to projects the user belongs to."""
+        user = self.request.user
+        user_projects = Project.objects.filter(
+            Q(members__user=user) | Q(created_by=user)
+        ).values_list('id_project', flat=True)
+
+        qs = ProjectMember.objects.filter(project_id__in=user_projects)
+
+        project_id = self.request.query_params.get('project')
+        if project_id is not None:
+            qs = qs.filter(project_id=project_id)
+
+        return qs.distinct()
+
 
 class BoardViewSet(viewsets.ModelViewSet):
     queryset = Board.objects.all()
     serializer_class = BoardSerializer
+
+    def get_queryset(self):
+        """Filter boards by ?project= query param when provided."""
+        qs = Board.objects.all()
+        project_id = self.request.query_params.get('project')
+        if project_id is not None:
+            qs = qs.filter(project_id=project_id)
+        return qs
 
 
 class TaskStatusViewSet(viewsets.ModelViewSet):
@@ -237,10 +289,26 @@ class TaskViewSet(viewsets.ModelViewSet):
     queryset = Task.objects.all()
     serializer_class = TaskSerializer
 
+    def get_queryset(self):
+        """Filter tasks by ?board= query param when provided."""
+        qs = Task.objects.all()
+        board_id = self.request.query_params.get('board')
+        if board_id is not None:
+            qs = qs.filter(board_id=board_id)
+        return qs
+
 
 class TaskCommentViewSet(viewsets.ModelViewSet):
     queryset = TaskComment.objects.all()
     serializer_class = TaskCommentSerializer
+
+    def get_queryset(self):
+        """Filter comments by ?task= query param when provided."""
+        qs = TaskComment.objects.all()
+        task_id = self.request.query_params.get('task')
+        if task_id is not None:
+            qs = qs.filter(task_id=task_id)
+        return qs
 
 
 class ActivityLogViewSet(viewsets.ModelViewSet):

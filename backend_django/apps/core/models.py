@@ -11,6 +11,14 @@ class UserAccount(models.Model):
     class Meta:
         db_table = "user_account"
 
+    @property
+    def is_authenticated(self):
+        return True
+
+    @property
+    def is_active(self):
+        return True
+
 
 class Project(models.Model):
     id_project = models.BigAutoField(primary_key=True)
