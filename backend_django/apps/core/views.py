@@ -595,6 +595,13 @@ class GithubCreateRepoView(APIView):
             )
 
         repo = repo_response.json()
+
+        project_id = data.get("project_id")
+        if project_id:
+            Project.objects.filter(id_project=project_id).update(
+                github_repo_full_name=repo.get("full_name")
+            )
+
         webhook_url = data.get("webhook_url") or settings.GITHUB_APP_WEBHOOK_TARGET_URL
         if not webhook_url:
             return Response(

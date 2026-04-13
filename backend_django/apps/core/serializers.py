@@ -98,6 +98,7 @@ class GithubOauthCallbackSerializer(serializers.Serializer):
 
 class GithubCreateRepoSerializer(serializers.Serializer):
     user_id = serializers.IntegerField(min_value=1)
+    project_id = serializers.IntegerField(required=False, min_value=1, help_text="ID del proyecto al que se vinculará el repositorio.")
     name = serializers.CharField(max_length=100)
     description = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     private = serializers.BooleanField(default=True)

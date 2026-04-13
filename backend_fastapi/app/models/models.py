@@ -28,6 +28,7 @@ class Project(Base):
         ForeignKey("user_account.id_user", ondelete="SET NULL"),
         nullable=True,
     )
+    github_repo_full_name: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
 
 
 class Role(Base):

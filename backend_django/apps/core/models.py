@@ -27,6 +27,7 @@ class Project(models.Model):
         db_column="created_by",
         related_name="projects_created",
     )
+    github_repo_full_name = models.CharField(max_length=255, null=True, blank=True, db_index=True)
 
     class Meta:
         db_table = "project"
