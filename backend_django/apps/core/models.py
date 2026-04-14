@@ -216,6 +216,9 @@ class GithubConnection(models.Model):
     github_user_id = models.BigIntegerField(unique=True)
     github_login = models.CharField(max_length=150)
     access_token = models.CharField(max_length=255)
+    refresh_token = models.CharField(max_length=255, null=True, blank=True)
+    token_expires_at = models.DateTimeField(null=True, blank=True)
+    refresh_token_expires_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

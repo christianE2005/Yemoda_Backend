@@ -10,6 +10,7 @@ from apps.core.views import (
     GithubAppLinkInstallationView,
     GithubAppOauthCallbackView,
     GithubAppOauthStartView,
+    GithubConnectionStatusView,
     GithubCreateRepoView,
     GithubPushWebhookView,
     LoginView,
@@ -49,6 +50,7 @@ urlpatterns = [
     path("api/github/app/oauth/callback/", GithubAppOauthCallbackView.as_view(), name="github-app-oauth-callback"),
     path("api/github/app/install/link/", GithubAppLinkInstallationView.as_view(), name="github-app-install-link"),
     path("api/github/repos/", GithubCreateRepoView.as_view(), name="github-create-repo"),
+    path("api/github/connection/status/", GithubConnectionStatusView.as_view(), name="github-connection-status"),
     path("api/github/webhook/push/", GithubPushWebhookView.as_view(), name="github-push-webhook"),
     path("api/", include(router.urls)),
 ]

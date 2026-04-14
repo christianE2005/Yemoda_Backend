@@ -53,6 +53,7 @@ from .serializers import (
 )
 
 GITHUB_API_URL = "https://api.github.com"
+_GITHUB_OAUTH_TOKEN_URL = "https://github.com/login/oauth/access_token"
 
 
 def _issue_tokens(user: UserAccount) -> dict:
@@ -109,6 +110,58 @@ def _github_app_headers() -> dict:
     }
 
 
+def _refresh_github_token(connection: GithubConnection) -> bool:
+    """
+    Attempt to refresh the GitHub OAuth token using the stored refresh_token.
+    Returns True if refreshed successfully, False otherwise.
+    GitHub App expiring tokens: https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/refreshing-user-access-tokens
+    """
+    if not connection.refresh_token:
+        return False
+
+    now = datetime.now(timezone.utc)
+    if connection.refresh_token_expires_at and connection.refresh_token_expires_at <= now:
+        return False
+
+    resp = requests.post(
+        _GITHUB_OAUTH_TOKEN_URL,
+        headers={"Accept": "application/json"},
+        data={
+            "client_id": settings.GITHUB_APP_CLIENT_ID,
+            "client_secret": settings.GITHUB_APP_CLIENT_SECRET,
+            "grant_type": "refresh_token",
+            "refresh_token": connection.refresh_token,
+        },
+        timeout=20,
+    )
+    if resp.status_code >= 400:
+        return False
+
+    data = resp.json()
+    new_token = data.get("access_token")
+    if not new_token:
+        return False
+
+    connection.access_token = new_token
+    if data.get("refresh_token"):
+        connection.refresh_token = data["refresh_token"]
+    if data.get("expires_in"):
+        connection.token_expires_at = now + timedelta(seconds=int(data["expires_in"]))
+    if data.get("refresh_token_expires_in"):
+        connection.refresh_token_expires_at = now + timedelta(seconds=int(data["refresh_token_expires_in"]))
+    connection.save()
+    return True
+
+
+def _get_valid_github_token(connection: GithubConnection) -> str | None:
+    """Return a valid access token, refreshing it if expired."""
+    now = datetime.now(timezone.utc)
+    if connection.token_expires_at and connection.token_expires_at <= now:
+        if not _refresh_github_token(connection):
+            return None
+    return connection.access_token
+
+
 def _installation_access_token(installation_id: int) -> str:
     token_resp = requests.post(
         f"{GITHUB_API_URL}/app/installations/{installation_id}/access_tokens",
@@ -128,9 +181,13 @@ def _resolve_org_installation_for_user(user: UserAccount, org_login: str) -> int
     if not github_connection:
         raise ValueError("El usuario no tiene GitHub conectado.")
 
+    token = _get_valid_github_token(github_connection)
+    if not token:
+        raise ValueError("La conexión de GitHub del usuario expiró. Vuelve a conectar tu cuenta.")
+
     membership_response = requests.get(
         f"{GITHUB_API_URL}/user/memberships/orgs/{org_login}",
-        headers=_github_headers(github_connection.access_token),
+        headers=_github_headers(token),
         timeout=20,
     )
     if membership_response.status_code >= 400:
@@ -516,13 +573,25 @@ class GithubAppOauthCallbackView(APIView):
         if existing_connection and existing_connection.user_id != user.id_user:
             return None, "Esta cuenta de GitHub ya esta vinculada con otro usuario.", status.HTTP_400_BAD_REQUEST
 
+        token_data = token_response.json()
+        now = datetime.now(timezone.utc)
+        github_connection_defaults = {
+            "github_user_id": github_user_id,
+            "github_login": github_login,
+            "access_token": access_token,
+            "refresh_token": token_data.get("refresh_token"),
+            "token_expires_at": (
+                now + timedelta(seconds=int(token_data["expires_in"]))
+                if token_data.get("expires_in") else None
+            ),
+            "refresh_token_expires_at": (
+                now + timedelta(seconds=int(token_data["refresh_token_expires_in"]))
+                if token_data.get("refresh_token_expires_in") else None
+            ),
+        }
         GithubConnection.objects.update_or_create(
             user=user,
-            defaults={
-                "github_user_id": github_user_id,
-                "github_login": github_login,
-                "access_token": access_token,
-            },
+            defaults=github_connection_defaults,
         )
 
         tokens = _issue_tokens(user)
@@ -624,7 +693,13 @@ class GithubCreateRepoView(APIView):
             github_connection = GithubConnection.objects.filter(user=user).first()
             if not github_connection:
                 return Response({"detail": "El usuario no tiene GitHub conectado."}, status=status.HTTP_400_BAD_REQUEST)
-            auth_headers = _github_headers(github_connection.access_token)
+            token = _get_valid_github_token(github_connection)
+            if not token:
+                return Response(
+                    {"detail": "La conexión de GitHub expiró. Vuelve a conectar tu cuenta."},
+                    status=status.HTTP_401_UNAUTHORIZED,
+                )
+            auth_headers = _github_headers(token)
             create_url = f"{GITHUB_API_URL}/user/repos"
         else:
             if not owner:
@@ -773,3 +848,41 @@ class GithubPushWebhookView(APIView):
             },
             status=status.HTTP_200_OK,
         )
+
+
+class GithubConnectionStatusView(APIView):
+    @extend_schema(responses={200: dict, 401: dict}, tags=["github-app"])
+    def get(self, request):
+        """
+        Returns the GitHub connection status for the authenticated user.
+        The frontend should call this to decide whether to show 'Conectar con GitHub'.
+        """
+        user = request.user
+        connection = GithubConnection.objects.filter(user=user).first()
+        if not connection:
+            return Response({"connected": False, "github_login": None}, status=status.HTTP_200_OK)
+
+        now = datetime.now(timezone.utc)
+        token_expired = bool(connection.token_expires_at and connection.token_expires_at <= now)
+        refresh_expired = bool(
+            connection.refresh_token_expires_at and connection.refresh_token_expires_at <= now
+        ) if connection.refresh_token else True
+
+        if token_expired:
+            if refresh_expired:
+                return Response(
+                    {"connected": False, "github_login": connection.github_login, "reason": "token_expired"},
+                    status=status.HTTP_200_OK,
+                )
+            refreshed = _refresh_github_token(connection)
+            if not refreshed:
+                return Response(
+                    {"connected": False, "github_login": connection.github_login, "reason": "token_expired"},
+                    status=status.HTTP_200_OK,
+                )
+
+        return Response(
+            {"connected": True, "github_login": connection.github_login},
+            status=status.HTTP_200_OK,
+        )
+
