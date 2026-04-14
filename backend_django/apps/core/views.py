@@ -778,10 +778,20 @@ class GithubCreateRepoView(APIView):
                     resolved_installation_id = _resolve_org_installation_for_user(user=user, org_login=owner)
                 except ValueError as exc:
                     return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+                except Exception as exc:
+                    return Response(
+                        {"detail": f"Error de configuración GitHub App: {exc}"},
+                        status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    )
             try:
                 token = _installation_access_token(resolved_installation_id)
             except ValueError as exc:
                 return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+            except Exception as exc:
+                return Response(
+                    {"detail": f"Error generando token de instalación: {exc}"},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                )
             auth_headers = _github_headers(token)
             create_url = f"{GITHUB_API_URL}/orgs/{owner}/repos"
 
