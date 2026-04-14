@@ -1,11 +1,31 @@
 from django.db import models
 
 
+class SystemRole(models.Model):
+    id_system_role = models.BigAutoField(primary_key=True)
+    name = models.CharField(max_length=50, unique=True)
+    description = models.TextField(null=True, blank=True)
+
+    class Meta:
+        db_table = "system_role"
+
+    def __str__(self):
+        return self.name
+
+
 class UserAccount(models.Model):
     id_user = models.BigAutoField(primary_key=True)
     email = models.EmailField(max_length=150, unique=True)
     username = models.CharField(max_length=100)
     password_hash = models.CharField(max_length=255)
+    system_role = models.ForeignKey(
+        SystemRole,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        db_column="id_system_role",
+        related_name="users",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -18,6 +38,10 @@ class UserAccount(models.Model):
     @property
     def is_active(self):
         return True
+
+    @property
+    def is_admin(self):
+        return self.system_role_id == 1
 
 
 class Project(models.Model):

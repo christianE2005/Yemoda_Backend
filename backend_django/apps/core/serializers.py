@@ -6,6 +6,7 @@ from .models import (
     Project,
     ProjectMember,
     Role,
+    SystemRole,
     Task,
     TaskComment,
     TaskPriority,
@@ -14,8 +15,15 @@ from .models import (
 )
 
 
+class SystemRoleSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = SystemRole
+        fields = "__all__"
+
+
 class UserAccountSerializer(serializers.ModelSerializer):
     password_hash = serializers.CharField(write_only=True, required=False)
+    system_role_name = serializers.CharField(source="system_role.name", read_only=True)
 
     class Meta:
         model = UserAccount

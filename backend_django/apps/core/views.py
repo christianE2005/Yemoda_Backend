@@ -16,6 +16,7 @@ from drf_spectacular.utils import extend_schema
 from rest_framework import status, viewsets
 from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import AllowAny
+from .authentication import IsAdminUser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -27,6 +28,7 @@ from .models import (
     Project,
     ProjectMember,
     Role,
+    SystemRole,
     Task,
     TaskComment,
     TaskPriority,
@@ -45,6 +47,7 @@ from .serializers import (
     RefreshSerializer,
     RegisterSerializer,
     RoleSerializer,
+    SystemRoleSerializer,
     TaskCommentSerializer,
     TaskPrioritySerializer,
     TaskSerializer,
@@ -61,6 +64,8 @@ def _issue_tokens(user: UserAccount) -> dict:
     access_payload = {
         "sub": str(user.id_user),
         "email": user.email,
+        "is_admin": user.is_admin,
+        "system_role_id": user.system_role_id,
         "type": "access",
         "exp": access_expires_at,
     }
@@ -290,6 +295,12 @@ class RoleViewSet(viewsets.ModelViewSet):
     serializer_class = RoleSerializer
 
 
+class SystemRoleViewSet(viewsets.ReadOnlyModelViewSet):
+    """System-level roles (Admin, User). Read-only — managed via migrations/DB."""
+    queryset = SystemRole.objects.all()
+    serializer_class = SystemRoleSerializer
+
+
 class ProjectMemberViewSet(viewsets.ModelViewSet):
     queryset = ProjectMember.objects.all()
     serializer_class = ProjectMemberSerializer
@@ -467,9 +478,14 @@ class RefreshView(APIView):
 
 
 class GithubAppInstallStartView(APIView):
-    permission_classes = [AllowAny]
+    """
+    Endpoint reservado para administradores de la organización.
+    Los usuarios normales NO deben usar este endpoint — la App ya está instalada en la org.
+    El flujo de usuarios es únicamente OAuth (/api/github/app/oauth/start/).
+    """
+    permission_classes = [IsAdminUser]
 
-    @extend_schema(responses={200: dict, 500: dict}, tags=["github-app"])
+    @extend_schema(responses={200: dict, 403: dict, 500: dict}, tags=["github-app"])
     def get(self, request):
         if not settings.GITHUB_APP_SLUG:
             return Response({"detail": "GITHUB_APP_SLUG no configurado."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

@@ -1,6 +1,6 @@
 import jwt
 from django.conf import settings
-from rest_framework import authentication, exceptions
+from rest_framework import authentication, exceptions, permissions
 from .models import UserAccount
 
 class UserAccountAuthentication(authentication.BaseAuthentication):
@@ -39,6 +39,12 @@ class UserAccountAuthentication(authentication.BaseAuthentication):
         if not user:
             raise exceptions.AuthenticationFailed("Usuario no encontrado.")
 
-        # Note: DRF expects a (user, auth) tuple.
-        # Even if UserAccount is not a standard Django User, DRF will handle it.
         return (user, token)
+
+
+class IsAdminUser(permissions.BasePermission):
+    """Only allows access to users with is_admin=True."""
+    message = "Se requiere rol de administrador para esta acción."
+
+    def has_permission(self, request, view):
+        return bool(request.user and getattr(request.user, "is_admin", False))
