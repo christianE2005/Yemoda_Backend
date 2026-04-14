@@ -523,7 +523,11 @@ class GithubAppOauthCallbackView(APIView):
         if token_response.status_code >= 400:
             return None, "No se pudo obtener access token de GitHub.", status.HTTP_400_BAD_REQUEST
 
-        access_token = token_response.json().get("access_token")
+        token_resp_json = token_response.json()
+        if token_resp_json.get("error"):
+            return None, f"GitHub OAuth error: {token_resp_json.get('error_description', token_resp_json['error'])}", status.HTTP_400_BAD_REQUEST
+
+        access_token = token_resp_json.get("access_token")
         if not access_token:
             return None, "GitHub no devolvio access_token.", status.HTTP_400_BAD_REQUEST
 
@@ -573,7 +577,7 @@ class GithubAppOauthCallbackView(APIView):
         if existing_connection and existing_connection.user_id != user.id_user:
             return None, "Esta cuenta de GitHub ya esta vinculada con otro usuario.", status.HTTP_400_BAD_REQUEST
 
-        token_data = token_response.json()
+        token_data = token_resp_json
         now = datetime.now(timezone.utc)
         github_connection_defaults = {
             "github_user_id": github_user_id,
