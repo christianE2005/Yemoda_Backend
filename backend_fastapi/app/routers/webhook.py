@@ -12,10 +12,13 @@ from app.services.agent_service import analyze_push
 from app.services.github_service import fetch_push_diff
 from app.services.task_service import (
     add_agent_comment,
+    create_warning,
     get_active_tasks,
+    get_active_warnings,
     get_project_by_repo,
     get_review_status,
     move_task_to_review,
+    resolve_warning,
 )
 
 logger = logging.getLogger(__name__)
@@ -63,8 +66,17 @@ async def _process_push(payload: dict, db: Session) -> None:
         for t in tasks
     ]
 
+    # Gather active warnings per task to pass to Gemini
+    active_warnings_map: dict[int, list[dict]] = {}
+    for t in tasks:
+        warnings = get_active_warnings(db, t.id_task)
+        if warnings:
+            active_warnings_map[t.id_task] = [
+                {"id": w.id_warning, "message": w.message} for w in warnings
+            ]
+
     try:
-        analysis = analyze_push(stories, diff)
+        analysis = analyze_push(stories, diff, active_warnings=active_warnings_map)
     except Exception as exc:
         logger.error("Gemini analysis failed: %s", exc)
         return
@@ -81,18 +93,33 @@ async def _process_push(payload: dict, db: Session) -> None:
         if review_status_id:
             move_task_to_review(db, task, review_status_id)
 
+        # Resolve warnings that Gemini says are fixed
+        resolved_ids = match.get("resolved_warning_ids") or []
+        task_warns = get_active_warnings(db, story_id)
+        for w in task_warns:
+            if w.id_warning in resolved_ids:
+                resolve_warning(db, w)
+                logger.info("Warning %s resolved for story %s.", w.id_warning, story_id)
+
+        # Create new warnings
+        new_warnings = match.get("new_warnings") or []
+        for msg in new_warnings:
+            create_warning(db, story_id, msg)
+            logger.info("New warning created for story %s: %s", story_id, msg)
+
+        # Build comment
         coverage = match.get("coverage", "partial")
         coverage_label = "✅ Completa" if coverage == "full" else "⚠️ Parcial"
-
         lines = [
             "🤖 **Análisis de IA — Push detectado**",
             f"**Cobertura:** {coverage_label}",
             f"**Razón:** {match.get('reason', '')}",
         ]
-        suggestions = match.get("suggestions") or []
-        if suggestions:
-            lines.append("\n**Sugerencias:**")
-            lines.extend(f"- {s}" for s in suggestions)
+        if resolved_ids:
+            lines.append(f"\n✅ **Warnings resueltos:** {len(resolved_ids)}")
+        if new_warnings:
+            lines.append("\n⚠️ **Nuevos warnings:**")
+            lines.extend(f"- {w}" for w in new_warnings)
 
         add_agent_comment(db, story_id, "\n".join(lines))
         logger.info("Story %s moved to Review and comment added.", story_id)

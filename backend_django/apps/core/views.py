@@ -25,6 +25,7 @@ from .models import (
     Board,
     GithubAppInstallation,
     GithubConnection,
+    GithubPushEvent,
     Project,
     ProjectMember,
     Role,
@@ -33,6 +34,7 @@ from .models import (
     TaskComment,
     TaskPriority,
     TaskStatus,
+    TaskWarning,
     UserAccount,
 )
 from .serializers import (
@@ -41,6 +43,7 @@ from .serializers import (
     GithubAppLinkInstallationSerializer,
     GithubCreateRepoSerializer,
     GithubOauthCallbackSerializer,
+    GithubPushEventSerializer,
     LoginSerializer,
     ProjectMemberSerializer,
     ProjectSerializer,
@@ -52,6 +55,7 @@ from .serializers import (
     TaskPrioritySerializer,
     TaskSerializer,
     TaskStatusSerializer,
+    TaskWarningSerializer,
     UserAccountSerializer,
 )
 
@@ -908,17 +912,161 @@ class GithubPushWebhookView(APIView):
                 }
             )
 
+        repo_full_name = (payload.get("repository") or {}).get("full_name", "")
+        ref = payload.get("ref", "")
+        pusher_name = (payload.get("pusher") or {}).get("name")
+
+        project = Project.objects.filter(github_repo_full_name__iexact=repo_full_name).first()
+        GithubPushEvent.objects.create(
+            project=project,
+            repo_full_name=repo_full_name,
+            ref=ref,
+            pusher=pusher_name,
+            commits=commit_summaries,
+        )
+
         return Response(
             {
-                "repository": (payload.get("repository") or {}).get("full_name"),
-                "ref": payload.get("ref"),
-                "pusher": (payload.get("pusher") or {}).get("name"),
+                "repository": repo_full_name,
+                "ref": ref,
+                "pusher": pusher_name,
                 "installation_id": installation_id,
                 "total_commits": len(commits),
                 "commits": commit_summaries,
             },
             status=status.HTTP_200_OK,
         )
+
+
+class GithubPushListView(APIView):
+    @extend_schema(responses={200: GithubPushEventSerializer(many=True)}, tags=["github-app"])
+    def get(self, request):
+        """
+        Retorna los push events recibidos.
+        Filtros opcionales: ?project_id=1  o  ?repo=owner/repo
+        """
+        qs = GithubPushEvent.objects.all()
+        project_id = request.query_params.get("project_id")
+        repo = request.query_params.get("repo")
+        if project_id:
+            qs = qs.filter(project_id=project_id)
+        if repo:
+            qs = qs.filter(repo_full_name__iexact=repo)
+        qs = qs[:50]
+        serializer = GithubPushEventSerializer(qs, many=True)
+        return Response(serializer.data)
+
+
+class GithubCommitDiffView(APIView):
+    @extend_schema(responses={200: dict, 400: dict}, tags=["github-app"])
+    def get(self, request):
+        """
+        Retorna el diff de un commit específico.
+        Parámetros requeridos: ?repo=owner/repo&commit=SHA
+        Usa el installation token de la org para autenticarse.
+        """
+        repo = request.query_params.get("repo", "").strip()
+        commit_sha = request.query_params.get("commit", "").strip()
+
+        if not repo or not commit_sha:
+            return Response(
+                {"detail": "Se requieren los parámetros 'repo' y 'commit'."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Find installation for this repo's org
+        org_login = repo.split("/")[0] if "/" in repo else repo
+        installation = GithubAppInstallation.objects.filter(
+            account_login__iexact=org_login
+        ).first()
+
+        if not installation:
+            return Response(
+                {"detail": f"No se encontró instalación de GitHub App para '{org_login}'."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            token = _installation_access_token(installation.installation_id)
+        except (ValueError, Exception) as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        diff_response = requests.get(
+            f"{GITHUB_API_URL}/repos/{repo}/commits/{commit_sha}",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github.diff",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+            timeout=30,
+        )
+
+        if diff_response.status_code >= 400:
+            return Response(
+                {"detail": "No se pudo obtener el diff.", "github_response": diff_response.text},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Also get the commit metadata (files list + stats)
+        meta_response = requests.get(
+            f"{GITHUB_API_URL}/repos/{repo}/commits/{commit_sha}",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+            timeout=30,
+        )
+        meta = meta_response.json() if meta_response.ok else {}
+        commit_info = meta.get("commit", {})
+        files = [
+            {
+                "filename": f.get("filename"),
+                "status": f.get("status"),
+                "additions": f.get("additions"),
+                "deletions": f.get("deletions"),
+                "patch": f.get("patch"),  # per-file diff
+            }
+            for f in meta.get("files", [])
+        ]
+
+        return Response(
+            {
+                "repo": repo,
+                "commit": commit_sha,
+                "message": commit_info.get("message"),
+                "author": (commit_info.get("author") or {}).get("name"),
+                "date": (commit_info.get("author") or {}).get("date"),
+                "stats": meta.get("stats", {}),
+                "files": files,
+                "diff": diff_response.text,
+            }
+        )
+
+
+class TaskWarningListView(APIView):
+    @extend_schema(responses={200: TaskWarningSerializer(many=True)}, tags=["warnings"])
+    def get(self, request):
+        """
+        Retorna warnings de tareas.
+        Filtros: ?task_id=1  ?status=active|resolved  ?project_id=1
+        """
+        qs = TaskWarning.objects.select_related("task")
+        task_id = request.query_params.get("task_id")
+        warn_status = request.query_params.get("status")
+        project_id = request.query_params.get("project_id")
+
+        if task_id:
+            qs = qs.filter(task_id=task_id)
+        if warn_status:
+            qs = qs.filter(status=warn_status)
+        if project_id:
+            qs = qs.filter(
+                task__id_board__in=Board.objects.filter(id_project=project_id).values_list("id_board", flat=True)
+            )
+
+        serializer = TaskWarningSerializer(qs[:100], many=True)
+        return Response(serializer.data)
 
 
 class GithubAppDebugView(APIView):

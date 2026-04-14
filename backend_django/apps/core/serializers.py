@@ -3,6 +3,7 @@ from rest_framework import serializers
 from .models import (
     ActivityLog,
     Board,
+    GithubPushEvent,
     Project,
     ProjectMember,
     Role,
@@ -11,6 +12,7 @@ from .models import (
     TaskComment,
     TaskPriority,
     TaskStatus,
+    TaskWarning,
     UserAccount,
 )
 
@@ -81,6 +83,18 @@ class TaskCommentSerializer(serializers.ModelSerializer):
 class ActivityLogSerializer(serializers.ModelSerializer):
     class Meta:
         model = ActivityLog
+        fields = "__all__"
+
+
+class GithubPushEventSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = GithubPushEvent
+        fields = "__all__"
+
+
+class TaskWarningSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = TaskWarning
         fields = "__all__"
 
 

@@ -268,3 +268,57 @@ class GithubAppInstallation(models.Model):
 
     class Meta:
         db_table = "github_app_installation"
+
+
+class GithubPushEvent(models.Model):
+    id_push = models.BigAutoField(primary_key=True)
+    project = models.ForeignKey(
+        "Project",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        db_column="id_project",
+        related_name="push_events",
+    )
+    repo_full_name = models.CharField(max_length=255)
+    ref = models.CharField(max_length=255)
+    pusher = models.CharField(max_length=150, null=True, blank=True)
+    commits = models.JSONField(default=list)
+    received_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "github_push_event"
+        ordering = ["-received_at"]
+
+
+class TaskWarning(models.Model):
+    STATUS_ACTIVE = "active"
+    STATUS_RESOLVED = "resolved"
+    STATUS_CHOICES = [
+        (STATUS_ACTIVE, "Active"),
+        (STATUS_RESOLVED, "Resolved"),
+    ]
+
+    id_warning = models.BigAutoField(primary_key=True)
+    task = models.ForeignKey(
+        Task,
+        on_delete=models.CASCADE,
+        db_column="id_task",
+        related_name="warnings",
+    )
+    message = models.TextField()
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_ACTIVE)
+    created_at = models.DateTimeField(auto_now_add=True)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+    resolved_in_push = models.ForeignKey(
+        GithubPushEvent,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        db_column="id_push_resolved",
+        related_name="resolved_warnings",
+    )
+
+    class Meta:
+        db_table = "task_warning"
+        ordering = ["-created_at"]

@@ -1,6 +1,8 @@
+from datetime import datetime, timezone
+
 from sqlalchemy.orm import Session
 
-from app.models.models import Board, Project, Task, TaskComment, TaskStatus
+from app.models.models import Board, Project, Task, TaskComment, TaskStatus, TaskWarning
 
 
 def get_project_by_repo(db: Session, repo_full_name: str) -> Project | None:
@@ -36,3 +38,25 @@ def add_agent_comment(db: Session, task_id: int, content: str) -> TaskComment:
     db.commit()
     db.refresh(comment)
     return comment
+
+
+def get_active_warnings(db: Session, task_id: int) -> list[TaskWarning]:
+    return (
+        db.query(TaskWarning)
+        .filter(TaskWarning.id_task == task_id, TaskWarning.status == "active")
+        .all()
+    )
+
+
+def create_warning(db: Session, task_id: int, message: str) -> TaskWarning:
+    warning = TaskWarning(id_task=task_id, message=message, status="active")
+    db.add(warning)
+    db.commit()
+    db.refresh(warning)
+    return warning
+
+
+def resolve_warning(db: Session, warning: TaskWarning) -> None:
+    warning.status = "resolved"
+    warning.resolved_at = datetime.now(timezone.utc)
+    db.commit()
