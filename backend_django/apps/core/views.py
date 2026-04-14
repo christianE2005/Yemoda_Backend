@@ -540,6 +540,34 @@ class GithubAppOauthCallbackView(APIView):
         if not github_login or not github_user_id:
             return None, "GitHub no devolvio datos validos de usuario.", status.HTTP_400_BAD_REQUEST
 
+        # Verify the user belongs to an org that has the GitHub App installed
+        orgs_response = requests.get(
+            f"{GITHUB_API_URL}/user/orgs",
+            headers=_github_headers(access_token),
+            timeout=20,
+        )
+        if orgs_response.status_code >= 400:
+            return None, "No se pudieron obtener las organizaciones del usuario.", status.HTTP_400_BAD_REQUEST
+
+        user_org_logins = {org["login"].lower() for org in orgs_response.json()}
+        installed_orgs = set(
+            GithubAppInstallation.objects.filter(
+                account_login__in=user_org_logins,
+                account_type="Organization",
+            ).values_list("account_login", flat=True)
+        )
+        # Normalize to lowercase for comparison
+        installed_orgs_lower = {o.lower() for o in installed_orgs}
+        matching_orgs = user_org_logins & installed_orgs_lower
+
+        if not matching_orgs:
+            return (
+                None,
+                "No perteneces a ninguna organización que tenga la aplicación instalada. "
+                "Pide a un administrador que instale la app en tu organización.",
+                status.HTTP_403_FORBIDDEN,
+            )
+
         token_user = _user_from_bearer_token(request)
         if request.method == "POST" and not token_user:
             return None, "Authorization Bearer requerido para vincular GitHub al usuario actual.", status.HTTP_401_UNAUTHORIZED
@@ -600,7 +628,12 @@ class GithubAppOauthCallbackView(APIView):
 
         tokens = _issue_tokens(user)
         return (
-            {**tokens, "user": UserAccountSerializer(user).data, "github_login": github_login},
+            {
+                **tokens,
+                "user": UserAccountSerializer(user).data,
+                "github_login": github_login,
+                "authorized_orgs": list(matching_orgs),
+            },
             None,
             status.HTTP_200_OK,
         )
