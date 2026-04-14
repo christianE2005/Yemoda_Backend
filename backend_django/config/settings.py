@@ -106,7 +106,13 @@ GITHUB_APP_SLUG = os.getenv("GITHUB_APP_SLUG", "")
 GITHUB_APP_CLIENT_ID = os.getenv("GITHUB_APP_CLIENT_ID", "")
 GITHUB_APP_CLIENT_SECRET = os.getenv("GITHUB_APP_CLIENT_SECRET", "")
 GITHUB_APP_OAUTH_CALLBACK_URL = os.getenv("GITHUB_APP_OAUTH_CALLBACK_URL", "")
-GITHUB_APP_PRIVATE_KEY = os.getenv("GITHUB_APP_PRIVATE_KEY", "").replace("\\n", "\n")
+_raw_private_key = os.getenv("GITHUB_APP_PRIVATE_KEY", "")
+# Handle Railway-style escaped newlines AND multiline values
+if "\\n" in _raw_private_key:
+    _raw_private_key = _raw_private_key.replace("\\n", "\n")
+# Strip surrounding quotes that some env systems add
+_raw_private_key = _raw_private_key.strip('"').strip("'")
+GITHUB_APP_PRIVATE_KEY = _raw_private_key
 GITHUB_APP_WEBHOOK_SECRET = os.getenv("GITHUB_APP_WEBHOOK_SECRET", "")
 GITHUB_APP_WEBHOOK_TARGET_URL = os.getenv("GITHUB_APP_WEBHOOK_TARGET_URL", "")
 GITHUB_APP_STATE_SECRET = os.getenv("GITHUB_APP_STATE_SECRET", JWT_SECRET_KEY)

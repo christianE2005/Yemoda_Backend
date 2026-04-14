@@ -7,7 +7,10 @@ import jwt as pyjwt
 GITHUB_API_URL = "https://api.github.com"
 
 _GITHUB_APP_ID = os.getenv("GITHUB_APP_ID", "")
-_GITHUB_APP_PRIVATE_KEY = os.getenv("GITHUB_APP_PRIVATE_KEY", "").replace("\\n", "\n")
+_raw_pk = os.getenv("GITHUB_APP_PRIVATE_KEY", "")
+if "\\n" in _raw_pk:
+    _raw_pk = _raw_pk.replace("\\n", "\n")
+_GITHUB_APP_PRIVATE_KEY = _raw_pk.strip('"').strip("'")
 
 
 def _generate_app_jwt() -> str:
