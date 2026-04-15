@@ -279,21 +279,31 @@ class ProjectViewSet(viewsets.ModelViewSet):
     serializer_class = ProjectSerializer
 
     def get_queryset(self):
-        """Filter projects to show only those where the user is a member or the creator."""
         user = self.request.user
         return Project.objects.filter(
             Q(members__user=user) | Q(created_by=user)
         ).distinct()
 
+    def create(self, request, *args, **kwargs):
+        import traceback
+        try:
+            return super().create(request, *args, **kwargs)
+        except Exception as e:
+            return Response(
+                {"error": str(e), "detail": traceback.format_exc()},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
     def perform_create(self, serializer):
-        """Automatically set the creator and add them as a member of the project."""
         project = serializer.save(created_by=self.request.user)
-        # Create membership record for the creator (Simplified approach: role=None)
-        ProjectMember.objects.get_or_create(
-            project=project,
-            user=self.request.user,
-            defaults={"role": None}
-        )
+        try:
+            ProjectMember.objects.get_or_create(
+                project=project,
+                user=self.request.user,
+                defaults={"role": None},
+            )
+        except Exception:
+            pass
 
 
 class RoleViewSet(viewsets.ModelViewSet):
