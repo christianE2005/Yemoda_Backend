@@ -1156,6 +1156,9 @@ class GithubRepoContentsView(APIView):
         # Directories first, then files, both alphabetically
         items.sort(key=lambda x: (0 if x["type"] == "dir" else 1, x["name"].lower()))
         return Response({"type": "dir", "path": path or "/", "items": items})
+
+
+class TaskWarningListView(APIView):
     @extend_schema(responses={200: TaskWarningSerializer(many=True)}, tags=["warnings"])
     def get(self, request):
         """
