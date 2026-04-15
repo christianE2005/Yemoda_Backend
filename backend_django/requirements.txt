@@ -7,3 +7,4 @@ PyJWT>=2.8,<3.0
 requests>=2.32,<3.0
 cryptography>=42.0,<45.0
 gunicorn>=21,<24
+django-cors-headers==4.9.0

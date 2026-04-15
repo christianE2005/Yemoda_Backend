@@ -177,6 +177,7 @@ class RegisterView(APIView):
         request=RegisterSerializer,
         responses={201: UserAccountSerializer, 400: dict},
         tags=["auth"],
+        auth=[],
     )
     def post(self, request):
         serializer = RegisterSerializer(data=request.data)
@@ -204,6 +205,7 @@ class LoginView(APIView):
         request=LoginSerializer,
         responses={200: dict, 401: dict},
         tags=["auth"],
+        auth=[],
     )
     def post(self, request):
         serializer = LoginSerializer(data=request.data)
