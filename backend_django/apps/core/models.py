@@ -1,15 +1,47 @@
 from django.db import models
 
 
+class SystemRole(models.Model):
+    id_system_role = models.BigAutoField(primary_key=True)
+    name = models.CharField(max_length=50, unique=True)
+    description = models.TextField(null=True, blank=True)
+
+    class Meta:
+        db_table = "system_role"
+
+    def __str__(self):
+        return self.name
+
+
 class UserAccount(models.Model):
     id_user = models.BigAutoField(primary_key=True)
     email = models.EmailField(max_length=150, unique=True)
     username = models.CharField(max_length=100)
     password_hash = models.CharField(max_length=255)
+    system_role = models.ForeignKey(
+        SystemRole,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        db_column="id_system_role",
+        related_name="users",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         db_table = "user_account"
+
+    @property
+    def is_authenticated(self):
+        return True
+
+    @property
+    def is_active(self):
+        return True
+
+    @property
+    def is_admin(self):
+        return self.system_role_id == 1
 
 
 class Project(models.Model):
@@ -27,6 +59,7 @@ class Project(models.Model):
         db_column="created_by",
         related_name="projects_created",
     )
+    github_repo_full_name = models.CharField(max_length=255, null=True, blank=True, db_index=True)
 
     class Meta:
         db_table = "project"
@@ -207,6 +240,9 @@ class GithubConnection(models.Model):
     github_user_id = models.BigIntegerField(unique=True)
     github_login = models.CharField(max_length=150)
     access_token = models.CharField(max_length=255)
+    refresh_token = models.CharField(max_length=255, null=True, blank=True)
+    token_expires_at = models.DateTimeField(null=True, blank=True)
+    refresh_token_expires_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -232,3 +268,86 @@ class GithubAppInstallation(models.Model):
 
     class Meta:
         db_table = "github_app_installation"
+
+
+class GithubPushEvent(models.Model):
+    id_push = models.BigAutoField(primary_key=True)
+    project = models.ForeignKey(
+        "Project",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        db_column="id_project",
+        related_name="push_events",
+    )
+    repo_full_name = models.CharField(max_length=255)
+    ref = models.CharField(max_length=255)
+    pusher = models.CharField(max_length=150, null=True, blank=True)
+    commits = models.JSONField(default=list)
+    received_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "github_push_event"
+        ordering = ["-received_at"]
+
+
+class TaskWarning(models.Model):
+    STATUS_ACTIVE = "active"
+    STATUS_RESOLVED = "resolved"
+    STATUS_CHOICES = [
+        (STATUS_ACTIVE, "Active"),
+        (STATUS_RESOLVED, "Resolved"),
+    ]
+
+    id_warning = models.BigAutoField(primary_key=True)
+    task = models.ForeignKey(
+        Task,
+        on_delete=models.CASCADE,
+        db_column="id_task",
+        related_name="warnings",
+    )
+    message = models.TextField()
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_ACTIVE)
+    created_at = models.DateTimeField(auto_now_add=True)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+    resolved_in_push = models.ForeignKey(
+        GithubPushEvent,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        db_column="id_push_resolved",
+        related_name="resolved_warnings",
+    )
+
+    class Meta:
+        db_table = "task_warning"
+        ordering = ["-created_at"]
+
+
+class GithubRepo(models.Model):
+    id_repo = models.BigAutoField(primary_key=True)
+    user = models.ForeignKey(
+        UserAccount,
+        on_delete=models.CASCADE,
+        db_column="id_user",
+        related_name="github_repos",
+    )
+    project = models.ForeignKey(
+        Project,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        db_column="id_project",
+        related_name="github_repos",
+    )
+    github_repo_id = models.BigIntegerField(unique=True)
+    full_name = models.CharField(max_length=255)
+    name = models.CharField(max_length=150)
+    owner = models.CharField(max_length=150)
+    private = models.BooleanField(default=True)
+    html_url = models.CharField(max_length=500)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "github_repo"
+        ordering = ["-created_at"]

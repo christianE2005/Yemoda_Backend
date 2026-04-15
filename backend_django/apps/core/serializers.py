@@ -3,19 +3,30 @@ from rest_framework import serializers
 from .models import (
     ActivityLog,
     Board,
+    GithubPushEvent,
+    GithubRepo,
     Project,
     ProjectMember,
     Role,
+    SystemRole,
     Task,
     TaskComment,
     TaskPriority,
     TaskStatus,
+    TaskWarning,
     UserAccount,
 )
 
 
+class SystemRoleSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = SystemRole
+        fields = "__all__"
+
+
 class UserAccountSerializer(serializers.ModelSerializer):
     password_hash = serializers.CharField(write_only=True, required=False)
+    system_role_name = serializers.CharField(source="system_role.name", read_only=True)
 
     class Meta:
         model = UserAccount
@@ -76,6 +87,24 @@ class ActivityLogSerializer(serializers.ModelSerializer):
         fields = "__all__"
 
 
+class GithubPushEventSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = GithubPushEvent
+        fields = "__all__"
+
+
+class TaskWarningSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = TaskWarning
+        fields = "__all__"
+
+
+class GithubRepoSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = GithubRepo
+        fields = "__all__"
+
+
 class RegisterSerializer(serializers.Serializer):
     email = serializers.EmailField(max_length=150)
     username = serializers.CharField(max_length=100)
@@ -98,6 +127,7 @@ class GithubOauthCallbackSerializer(serializers.Serializer):
 
 class GithubCreateRepoSerializer(serializers.Serializer):
     user_id = serializers.IntegerField(min_value=1)
+    project_id = serializers.IntegerField(required=False, min_value=1, help_text="ID del proyecto al que se vinculará el repositorio.")
     name = serializers.CharField(max_length=100)
     description = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     private = serializers.BooleanField(default=True)

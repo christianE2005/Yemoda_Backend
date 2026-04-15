@@ -28,6 +28,7 @@ class Project(Base):
         ForeignKey("user_account.id_user", ondelete="SET NULL"),
         nullable=True,
     )
+    github_repo_full_name: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
 
 
 class Role(Base):
@@ -157,3 +158,19 @@ class ActivityLog(Base):
     entity_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     action: Mapped[str | None] = mapped_column(String(100), nullable=True)
     created_at: Mapped[DateTime] = mapped_column(DateTime, server_default=func.now())
+
+
+class TaskWarning(Base):
+    __tablename__ = "task_warning"
+
+    id_warning: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    id_task: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("task.id_task", ondelete="CASCADE"),
+        nullable=False,
+    )
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
+    created_at: Mapped[DateTime] = mapped_column(DateTime, server_default=func.now())
+    resolved_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+    id_push_resolved: Mapped[int | None] = mapped_column(Integer, nullable=True)

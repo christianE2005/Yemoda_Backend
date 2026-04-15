@@ -10,9 +10,13 @@ import requests
 from django.conf import settings
 from django.contrib.auth.hashers import check_password, make_password
 from django.http import HttpResponse
+from django.db import models
+from django.db.models import Q
 from drf_spectacular.utils import extend_schema
 from rest_framework import status, viewsets
+from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import AllowAny
+from .authentication import IsAdminUser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -21,13 +25,17 @@ from .models import (
     Board,
     GithubAppInstallation,
     GithubConnection,
+    GithubPushEvent,
+    GithubRepo,
     Project,
     ProjectMember,
     Role,
+    SystemRole,
     Task,
     TaskComment,
     TaskPriority,
     TaskStatus,
+    TaskWarning,
     UserAccount,
 )
 from .serializers import (
@@ -36,20 +44,25 @@ from .serializers import (
     GithubAppLinkInstallationSerializer,
     GithubCreateRepoSerializer,
     GithubOauthCallbackSerializer,
+    GithubPushEventSerializer,
+    GithubRepoSerializer,
     LoginSerializer,
     ProjectMemberSerializer,
     ProjectSerializer,
     RefreshSerializer,
     RegisterSerializer,
     RoleSerializer,
+    SystemRoleSerializer,
     TaskCommentSerializer,
     TaskPrioritySerializer,
     TaskSerializer,
     TaskStatusSerializer,
+    TaskWarningSerializer,
     UserAccountSerializer,
 )
 
 GITHUB_API_URL = "https://api.github.com"
+_GITHUB_OAUTH_TOKEN_URL = "https://github.com/login/oauth/access_token"
 
 
 def _issue_tokens(user: UserAccount) -> dict:
@@ -57,6 +70,8 @@ def _issue_tokens(user: UserAccount) -> dict:
     access_payload = {
         "sub": str(user.id_user),
         "email": user.email,
+        "is_admin": user.is_admin,
+        "system_role_id": user.system_role_id,
         "type": "access",
         "exp": access_expires_at,
     }
@@ -106,6 +121,58 @@ def _github_app_headers() -> dict:
     }
 
 
+def _refresh_github_token(connection: GithubConnection) -> bool:
+    """
+    Attempt to refresh the GitHub OAuth token using the stored refresh_token.
+    Returns True if refreshed successfully, False otherwise.
+    GitHub App expiring tokens: https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/refreshing-user-access-tokens
+    """
+    if not connection.refresh_token:
+        return False
+
+    now = datetime.now(timezone.utc)
+    if connection.refresh_token_expires_at and connection.refresh_token_expires_at <= now:
+        return False
+
+    resp = requests.post(
+        _GITHUB_OAUTH_TOKEN_URL,
+        headers={"Accept": "application/json"},
+        data={
+            "client_id": settings.GITHUB_APP_CLIENT_ID,
+            "client_secret": settings.GITHUB_APP_CLIENT_SECRET,
+            "grant_type": "refresh_token",
+            "refresh_token": connection.refresh_token,
+        },
+        timeout=20,
+    )
+    if resp.status_code >= 400:
+        return False
+
+    data = resp.json()
+    new_token = data.get("access_token")
+    if not new_token:
+        return False
+
+    connection.access_token = new_token
+    if data.get("refresh_token"):
+        connection.refresh_token = data["refresh_token"]
+    if data.get("expires_in"):
+        connection.token_expires_at = now + timedelta(seconds=int(data["expires_in"]))
+    if data.get("refresh_token_expires_in"):
+        connection.refresh_token_expires_at = now + timedelta(seconds=int(data["refresh_token_expires_in"]))
+    connection.save()
+    return True
+
+
+def _get_valid_github_token(connection: GithubConnection) -> str | None:
+    """Return a valid access token, refreshing it if expired."""
+    now = datetime.now(timezone.utc)
+    if connection.token_expires_at and connection.token_expires_at <= now:
+        if not _refresh_github_token(connection):
+            return None
+    return connection.access_token
+
+
 def _installation_access_token(installation_id: int) -> str:
     token_resp = requests.post(
         f"{GITHUB_API_URL}/app/installations/{installation_id}/access_tokens",
@@ -120,6 +187,88 @@ def _installation_access_token(installation_id: int) -> str:
     return token
 
 
+def _resolve_org_installation_for_user(user: UserAccount, org_login: str) -> int:
+    github_connection = GithubConnection.objects.filter(user=user).first()
+    if not github_connection:
+        raise ValueError("El usuario no tiene GitHub conectado.")
+
+    token = _get_valid_github_token(github_connection)
+    if not token:
+        raise ValueError("La conexión de GitHub del usuario expiró. Vuelve a conectar tu cuenta.")
+
+    membership_response = requests.get(
+        f"{GITHUB_API_URL}/user/memberships/orgs/{org_login}",
+        headers=_github_headers(token),
+        timeout=20,
+    )
+    if membership_response.status_code >= 400:
+        raise ValueError("El usuario no pertenece a la organizacion solicitada.")
+    membership = membership_response.json()
+    if membership.get("state") != "active":
+        raise ValueError("La membresia del usuario en la organizacion no esta activa.")
+
+    installations_response = requests.get(
+        f"{GITHUB_API_URL}/app/installations",
+        headers=_github_app_headers(),
+        timeout=20,
+    )
+    if installations_response.status_code >= 400:
+        raise ValueError("No se pudieron consultar las instalaciones de GitHub App.")
+
+    installations = installations_response.json()
+    for installation in installations:
+        account = installation.get("account") or {}
+        if account.get("login", "").lower() == org_login.lower():
+            install_obj, _ = GithubAppInstallation.objects.update_or_create(
+                installation_id=installation["id"],
+                defaults={
+                    "account_login": account.get("login", org_login),
+                    "account_type": account.get("type"),
+                    "user": user,
+                },
+            )
+            return install_obj.installation_id
+
+    raise ValueError("La GitHub App no esta instalada en esa organizacion.")
+
+
+def _build_signed_oauth_state() -> str:
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+    payload = {
+        "nonce": secrets.token_urlsafe(24),
+        "exp": int(expires_at.timestamp()),
+        "purpose": "github_app_oauth",
+    }
+    return jwt.encode(payload, settings.GITHUB_APP_STATE_SECRET, algorithm="HS256")
+
+
+def _validate_signed_oauth_state(state: str) -> bool:
+    try:
+        payload = jwt.decode(state, settings.GITHUB_APP_STATE_SECRET, algorithms=["HS256"])
+    except jwt.InvalidTokenError:
+        return False
+    return payload.get("purpose") == "github_app_oauth"
+
+
+def _user_from_bearer_token(request) -> UserAccount | None:
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        return None
+    token = auth_header.split(" ", 1)[1].strip()
+    if not token:
+        return None
+    try:
+        payload = jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
+    except jwt.InvalidTokenError:
+        return None
+    if payload.get("type") != "access":
+        return None
+    user_id = payload.get("sub")
+    if not user_id:
+        return None
+    return UserAccount.objects.filter(id_user=user_id).first()
+
+
 class UserAccountViewSet(viewsets.ModelViewSet):
     queryset = UserAccount.objects.all()
     serializer_class = UserAccountSerializer
@@ -129,20 +278,75 @@ class ProjectViewSet(viewsets.ModelViewSet):
     queryset = Project.objects.all()
     serializer_class = ProjectSerializer
 
+    def get_queryset(self):
+        """Filter projects to show only those where the user is a member or the creator."""
+        user = self.request.user
+        return Project.objects.filter(
+            Q(members__user=user) | Q(created_by=user)
+        ).distinct()
+
+    def perform_create(self, serializer):
+        """Automatically set the creator and add them as a member of the project."""
+        project = serializer.save(created_by=self.request.user)
+        # Create membership record for the creator (Simplified approach: role=None)
+        ProjectMember.objects.get_or_create(
+            project=project,
+            user=self.request.user,
+            defaults={"role": None}
+        )
+
 
 class RoleViewSet(viewsets.ModelViewSet):
     queryset = Role.objects.all()
     serializer_class = RoleSerializer
 
 
+class SystemRoleViewSet(viewsets.ReadOnlyModelViewSet):
+    """System-level roles (Admin, User). Read-only — managed via migrations/DB."""
+    queryset = SystemRole.objects.all()
+    serializer_class = SystemRoleSerializer
+
+
 class ProjectMemberViewSet(viewsets.ModelViewSet):
     queryset = ProjectMember.objects.all()
     serializer_class = ProjectMemberSerializer
+
+    def perform_create(self, serializer):
+        """Prevent adding a user who is already the project creator."""
+        project = serializer.validated_data.get('project')
+        user = serializer.validated_data.get('user')
+        if project and user and project.created_by_id == user.pk:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError("El creador del proyecto ya es miembro por defecto.")
+        serializer.save()
+
+    def get_queryset(self):
+        """Filter members to the requested project (if ?project= provided), scoped to projects the user belongs to."""
+        user = self.request.user
+        user_projects = Project.objects.filter(
+            Q(members__user=user) | Q(created_by=user)
+        ).values_list('id_project', flat=True)
+
+        qs = ProjectMember.objects.filter(project_id__in=user_projects)
+
+        project_id = self.request.query_params.get('project')
+        if project_id is not None:
+            qs = qs.filter(project_id=project_id)
+
+        return qs.distinct()
 
 
 class BoardViewSet(viewsets.ModelViewSet):
     queryset = Board.objects.all()
     serializer_class = BoardSerializer
+
+    def get_queryset(self):
+        """Filter boards by ?project= query param when provided."""
+        qs = Board.objects.all()
+        project_id = self.request.query_params.get('project')
+        if project_id is not None:
+            qs = qs.filter(project_id=project_id)
+        return qs
 
 
 class TaskStatusViewSet(viewsets.ModelViewSet):
@@ -159,10 +363,26 @@ class TaskViewSet(viewsets.ModelViewSet):
     queryset = Task.objects.all()
     serializer_class = TaskSerializer
 
+    def get_queryset(self):
+        """Filter tasks by ?board= query param when provided."""
+        qs = Task.objects.all()
+        board_id = self.request.query_params.get('board')
+        if board_id is not None:
+            qs = qs.filter(board_id=board_id)
+        return qs
+
 
 class TaskCommentViewSet(viewsets.ModelViewSet):
     queryset = TaskComment.objects.all()
     serializer_class = TaskCommentSerializer
+
+    def get_queryset(self):
+        """Filter comments by ?task= query param when provided."""
+        qs = TaskComment.objects.all()
+        task_id = self.request.query_params.get('task')
+        if task_id is not None:
+            qs = qs.filter(task_id=task_id)
+        return qs
 
 
 class ActivityLogViewSet(viewsets.ModelViewSet):
@@ -266,9 +486,14 @@ class RefreshView(APIView):
 
 
 class GithubAppInstallStartView(APIView):
-    permission_classes = [AllowAny]
+    """
+    Endpoint reservado para administradores de la organización.
+    Los usuarios normales NO deben usar este endpoint — la App ya está instalada en la org.
+    El flujo de usuarios es únicamente OAuth (/api/github/app/oauth/start/).
+    """
+    permission_classes = [IsAdminUser]
 
-    @extend_schema(responses={200: dict, 500: dict}, tags=["github-app"])
+    @extend_schema(responses={200: dict, 403: dict, 500: dict}, tags=["github-app"])
     def get(self, request):
         if not settings.GITHUB_APP_SLUG:
             return Response({"detail": "GITHUB_APP_SLUG no configurado."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -287,8 +512,7 @@ class GithubAppOauthStartView(APIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
-        state = secrets.token_urlsafe(24)
-        request.session["github_app_oauth_state"] = state
+        state = _build_signed_oauth_state()
         params = {
             "client_id": settings.GITHUB_APP_CLIENT_ID,
             "redirect_uri": settings.GITHUB_APP_OAUTH_CALLBACK_URL,
@@ -301,12 +525,10 @@ class GithubAppOauthStartView(APIView):
 class GithubAppOauthCallbackView(APIView):
     permission_classes = [AllowAny]
 
-    @extend_schema(request=GithubOauthCallbackSerializer, responses={200: dict, 400: dict, 500: dict}, tags=["github-app"])
+    @extend_schema(request=GithubOauthCallbackSerializer, responses={200: dict, 400: dict, 401: dict, 500: dict}, tags=["github-app"])
     def _complete_oauth(self, request, code: str, state: str) -> tuple[dict | None, str | None, int]:
-        session_state = request.session.get("github_app_oauth_state")
-        if not session_state or not secrets.compare_digest(state, session_state):
+        if not _validate_signed_oauth_state(state):
             return None, "OAuth state invalido.", status.HTTP_400_BAD_REQUEST
-        request.session.pop("github_app_oauth_state", None)
 
         if not settings.GITHUB_APP_CLIENT_ID or not settings.GITHUB_APP_CLIENT_SECRET:
             return None, "Credenciales OAuth de GitHub App incompletas.", status.HTTP_500_INTERNAL_SERVER_ERROR
@@ -325,7 +547,11 @@ class GithubAppOauthCallbackView(APIView):
         if token_response.status_code >= 400:
             return None, "No se pudo obtener access token de GitHub.", status.HTTP_400_BAD_REQUEST
 
-        access_token = token_response.json().get("access_token")
+        token_resp_json = token_response.json()
+        if token_resp_json.get("error"):
+            return None, f"GitHub OAuth error: {token_resp_json.get('error_description', token_resp_json['error'])}", status.HTTP_400_BAD_REQUEST
+
+        access_token = token_resp_json.get("access_token")
         if not access_token:
             return None, "GitHub no devolvio access_token.", status.HTTP_400_BAD_REQUEST
 
@@ -333,43 +559,113 @@ class GithubAppOauthCallbackView(APIView):
         if user_response.status_code >= 400:
             return None, "No se pudo obtener usuario de GitHub.", status.HTTP_400_BAD_REQUEST
         github_user = user_response.json()
+        github_login = github_user.get("login")
+        github_user_id = github_user.get("id")
+        if not github_login or not github_user_id:
+            return None, "GitHub no devolvio datos validos de usuario.", status.HTTP_400_BAD_REQUEST
 
-        emails_response = requests.get(f"{GITHUB_API_URL}/user/emails", headers=_github_headers(access_token), timeout=20)
-        email = None
-        if emails_response.status_code < 400:
-            emails = emails_response.json()
-            primary = next((e for e in emails if e.get("primary") and e.get("verified")), None)
-            fallback = next((e for e in emails if e.get("verified")), None)
-            chosen = primary or fallback
-            if chosen:
-                email = chosen.get("email")
-        if not email:
-            email = github_user.get("email") or f"{github_user['login']}@users.noreply.github.com"
+        # Verify the user belongs to an org that has the GitHub App installed
+        orgs_response = requests.get(
+            f"{GITHUB_API_URL}/user/orgs",
+            headers=_github_headers(access_token),
+            timeout=20,
+        )
+        if orgs_response.status_code >= 400:
+            return None, "No se pudieron obtener las organizaciones del usuario.", status.HTTP_400_BAD_REQUEST
 
-        username = github_user.get("login") or email.split("@")[0]
-        user = UserAccount.objects.filter(email=email).first()
-        if not user:
-            user = UserAccount.objects.create(
-                email=email,
-                username=username,
-                password_hash=make_password(None),
+        user_org_logins = {org["login"].lower() for org in orgs_response.json()}
+
+        if not user_org_logins:
+            return (
+                None,
+                "No perteneces a ninguna organización que tenga la aplicación instalada. "
+                "Pide a un administrador que instale la app en tu organización.",
+                status.HTTP_403_FORBIDDEN,
             )
-        elif user.username != username:
-            user.username = username
-            user.save(update_fields=["username"])
 
+        installed_orgs = set(
+            GithubAppInstallation.objects.filter(
+                account_login__iregex=r"^(" + "|".join(user_org_logins) + r")$",
+                account_type="Organization",
+            ).values_list("account_login", flat=True)
+        )
+        installed_orgs_lower = {o.lower() for o in installed_orgs}
+        matching_orgs = user_org_logins & installed_orgs_lower
+
+        if not matching_orgs:
+            return (
+                None,
+                "No perteneces a ninguna organización que tenga la aplicación instalada. "
+                "Pide a un administrador que instale la app en tu organización.",
+                status.HTTP_403_FORBIDDEN,
+            )
+
+        token_user = _user_from_bearer_token(request)
+        if request.method == "POST" and not token_user:
+            return None, "Authorization Bearer requerido para vincular GitHub al usuario actual.", status.HTTP_401_UNAUTHORIZED
+
+        user = token_user
+        if user:
+            if user.username != github_login:
+                user.username = github_login
+                user.save(update_fields=["username"])
+        else:
+            emails_response = requests.get(f"{GITHUB_API_URL}/user/emails", headers=_github_headers(access_token), timeout=20)
+            email = None
+            if emails_response.status_code < 400:
+                emails = emails_response.json()
+                primary = next((e for e in emails if e.get("primary") and e.get("verified")), None)
+                fallback = next((e for e in emails if e.get("verified")), None)
+                chosen = primary or fallback
+                if chosen:
+                    email = chosen.get("email")
+            if not email:
+                email = github_user.get("email") or f"{github_login}@users.noreply.github.com"
+
+            user = UserAccount.objects.filter(email=email).first()
+            if not user:
+                user = UserAccount.objects.create(
+                    email=email,
+                    username=github_login,
+                    password_hash=make_password(None),
+                )
+            elif user.username != github_login:
+                user.username = github_login
+                user.save(update_fields=["username"])
+
+        existing_connection = GithubConnection.objects.filter(github_user_id=github_user_id).first()
+        if existing_connection and existing_connection.user_id != user.id_user:
+            return None, "Esta cuenta de GitHub ya esta vinculada con otro usuario.", status.HTTP_400_BAD_REQUEST
+
+        token_data = token_resp_json
+        now = datetime.now(timezone.utc)
+        github_connection_defaults = {
+            "github_user_id": github_user_id,
+            "github_login": github_login,
+            "access_token": access_token,
+            "refresh_token": token_data.get("refresh_token"),
+            "token_expires_at": (
+                now + timedelta(seconds=int(token_data["expires_in"]))
+                if token_data.get("expires_in") else None
+            ),
+            "refresh_token_expires_at": (
+                now + timedelta(seconds=int(token_data["refresh_token_expires_in"]))
+                if token_data.get("refresh_token_expires_in") else None
+            ),
+        }
         GithubConnection.objects.update_or_create(
             user=user,
-            defaults={
-                "github_user_id": github_user["id"],
-                "github_login": github_user["login"],
-                "access_token": access_token,
-            },
+            defaults=github_connection_defaults,
         )
 
         tokens = _issue_tokens(user)
         return (
-            {**tokens, "user": UserAccountSerializer(user).data, "github_login": github_user["login"]},
+            {
+                **tokens,
+                "user": UserAccountSerializer(user).data,
+                "github_login": github_login,
+                "authorized_orgs": list(matching_orgs),
+            },
             None,
             status.HTTP_200_OK,
         )
@@ -447,6 +743,16 @@ class GithubAppLinkInstallationView(APIView):
 
 
 class GithubCreateRepoView(APIView):
+    @extend_schema(responses={200: GithubRepoSerializer(many=True)}, tags=["github-app"])
+    def get(self, request):
+        """Lista los repositorios creados por el usuario autenticado."""
+        user = request.user
+        qs = GithubRepo.objects.filter(user=user)
+        project_id = request.query_params.get("project_id")
+        if project_id:
+            qs = qs.filter(project_id=project_id)
+        return Response(GithubRepoSerializer(qs, many=True).data)
+
     @extend_schema(request=GithubCreateRepoSerializer, responses={201: dict, 400: dict, 404: dict}, tags=["github-app"])
     def post(self, request):
         serializer = GithubCreateRepoSerializer(data=request.data)
@@ -466,7 +772,13 @@ class GithubCreateRepoView(APIView):
             github_connection = GithubConnection.objects.filter(user=user).first()
             if not github_connection:
                 return Response({"detail": "El usuario no tiene GitHub conectado."}, status=status.HTTP_400_BAD_REQUEST)
-            auth_headers = _github_headers(github_connection.access_token)
+            token = _get_valid_github_token(github_connection)
+            if not token:
+                return Response(
+                    {"detail": "La conexión de GitHub expiró. Vuelve a conectar tu cuenta."},
+                    status=status.HTTP_401_UNAUTHORIZED,
+                )
+            auth_headers = _github_headers(token)
             create_url = f"{GITHUB_API_URL}/user/repos"
         else:
             if not owner:
@@ -475,15 +787,29 @@ class GithubCreateRepoView(APIView):
             if not installation_id:
                 linked = GithubAppInstallation.objects.filter(user=user, account_login=owner).first()
                 installation_id = linked.installation_id if linked else None
-            if not installation_id:
-                return Response(
-                    {"detail": "No hay instalacion vinculada. Usa /api/github/app/install/link/ con installation_id."},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
+            if isinstance(installation_id, int) and installation_id > 0:
+                resolved_installation_id = installation_id
+            else:
+                resolved_installation_id = None
+            if not resolved_installation_id:
+                try:
+                    resolved_installation_id = _resolve_org_installation_for_user(user=user, org_login=owner)
+                except ValueError as exc:
+                    return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+                except Exception as exc:
+                    return Response(
+                        {"detail": f"Error de configuración GitHub App: {exc}"},
+                        status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    )
             try:
-                token = _installation_access_token(installation_id)
+                token = _installation_access_token(resolved_installation_id)
             except ValueError as exc:
                 return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+            except Exception as exc:
+                return Response(
+                    {"detail": f"Error generando token de instalación: {exc}"},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                )
             auth_headers = _github_headers(token)
             create_url = f"{GITHUB_API_URL}/orgs/{owner}/repos"
 
@@ -501,6 +827,29 @@ class GithubCreateRepoView(APIView):
             )
 
         repo = repo_response.json()
+
+        project_id = data.get("project_id")
+        project_obj = None
+        if project_id:
+            Project.objects.filter(id_project=project_id).update(
+                github_repo_full_name=repo.get("full_name")
+            )
+            project_obj = Project.objects.filter(id_project=project_id).first()
+
+        # Always persist the repo so it can be listed later
+        GithubRepo.objects.update_or_create(
+            github_repo_id=repo["id"],
+            defaults={
+                "user": user,
+                "project": project_obj,
+                "full_name": repo.get("full_name", ""),
+                "name": repo.get("name", ""),
+                "owner": (repo.get("owner") or {}).get("login", owner or ""),
+                "private": repo.get("private", True),
+                "html_url": repo.get("html_url", ""),
+            },
+        )
+
         webhook_url = data.get("webhook_url") or settings.GITHUB_APP_WEBHOOK_TARGET_URL
         if not webhook_url:
             return Response(
@@ -593,14 +942,305 @@ class GithubPushWebhookView(APIView):
                 }
             )
 
+        repo_full_name = (payload.get("repository") or {}).get("full_name", "")
+        ref = payload.get("ref", "")
+        pusher_name = (payload.get("pusher") or {}).get("name")
+
+        project = Project.objects.filter(github_repo_full_name__iexact=repo_full_name).first()
+        GithubPushEvent.objects.create(
+            project=project,
+            repo_full_name=repo_full_name,
+            ref=ref,
+            pusher=pusher_name,
+            commits=commit_summaries,
+        )
+
         return Response(
             {
-                "repository": (payload.get("repository") or {}).get("full_name"),
-                "ref": payload.get("ref"),
-                "pusher": (payload.get("pusher") or {}).get("name"),
+                "repository": repo_full_name,
+                "ref": ref,
+                "pusher": pusher_name,
                 "installation_id": installation_id,
                 "total_commits": len(commits),
                 "commits": commit_summaries,
             },
             status=status.HTTP_200_OK,
         )
+
+
+class GithubPushListView(APIView):
+    @extend_schema(responses={200: GithubPushEventSerializer(many=True)}, tags=["github-app"])
+    def get(self, request):
+        """
+        Retorna los push events recibidos.
+        Filtros opcionales: ?project_id=1  o  ?repo=owner/repo
+        """
+        qs = GithubPushEvent.objects.all()
+        project_id = request.query_params.get("project_id")
+        repo = request.query_params.get("repo")
+        if project_id:
+            qs = qs.filter(project_id=project_id)
+        if repo:
+            qs = qs.filter(repo_full_name__iexact=repo)
+        qs = qs[:50]
+        serializer = GithubPushEventSerializer(qs, many=True)
+        return Response(serializer.data)
+
+
+class GithubCommitDiffView(APIView):
+    @extend_schema(responses={200: dict, 400: dict}, tags=["github-app"])
+    def get(self, request):
+        """
+        Retorna el diff de un commit específico.
+        Parámetros requeridos: ?repo=owner/repo&commit=SHA
+        Usa el installation token de la org para autenticarse.
+        """
+        repo = request.query_params.get("repo", "").strip()
+        commit_sha = request.query_params.get("commit", "").strip()
+
+        if not repo or not commit_sha:
+            return Response(
+                {"detail": "Se requieren los parámetros 'repo' y 'commit'."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Find installation for this repo's org
+        org_login = repo.split("/")[0] if "/" in repo else repo
+        installation = GithubAppInstallation.objects.filter(
+            account_login__iexact=org_login
+        ).first()
+
+        if not installation:
+            return Response(
+                {"detail": f"No se encontró instalación de GitHub App para '{org_login}'."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            token = _installation_access_token(installation.installation_id)
+        except (ValueError, Exception) as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        diff_response = requests.get(
+            f"{GITHUB_API_URL}/repos/{repo}/commits/{commit_sha}",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github.diff",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+            timeout=30,
+        )
+
+        if diff_response.status_code >= 400:
+            return Response(
+                {"detail": "No se pudo obtener el diff.", "github_response": diff_response.text},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Also get the commit metadata (files list + stats)
+        meta_response = requests.get(
+            f"{GITHUB_API_URL}/repos/{repo}/commits/{commit_sha}",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+            timeout=30,
+        )
+        meta = meta_response.json() if meta_response.ok else {}
+        commit_info = meta.get("commit", {})
+        files = [
+            {
+                "filename": f.get("filename"),
+                "status": f.get("status"),
+                "additions": f.get("additions"),
+                "deletions": f.get("deletions"),
+                "patch": f.get("patch"),  # per-file diff
+            }
+            for f in meta.get("files", [])
+        ]
+
+        return Response(
+            {
+                "repo": repo,
+                "commit": commit_sha,
+                "message": commit_info.get("message"),
+                "author": (commit_info.get("author") or {}).get("name"),
+                "date": (commit_info.get("author") or {}).get("date"),
+                "stats": meta.get("stats", {}),
+                "files": files,
+                "diff": diff_response.text,
+            }
+        )
+
+
+class GithubRepoContentsView(APIView):
+    @extend_schema(responses={200: dict, 400: dict}, tags=["github-app"])
+    def get(self, request):
+        """
+        Navega los archivos de un repositorio usando la GitHub Contents API.
+
+        Parámetros requeridos: ?repo=owner/repo
+        Parámetros opcionales:
+          ?path=src/components   (subcarpeta, default raíz)
+          ?ref=main              (branch/tag/SHA, default branch por defecto del repo)
+        """
+        repo = request.query_params.get("repo", "").strip()
+        path = request.query_params.get("path", "").strip("/")
+        ref = request.query_params.get("ref", "").strip()
+
+        if not repo:
+            return Response({"detail": "El parámetro 'repo' es requerido."}, status=status.HTTP_400_BAD_REQUEST)
+
+        org_login = repo.split("/")[0] if "/" in repo else repo
+        installation = GithubAppInstallation.objects.filter(account_login__iexact=org_login).first()
+        if not installation:
+            return Response(
+                {"detail": f"No se encontró instalación de GitHub App para '{org_login}'."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            token = _installation_access_token(installation.installation_id)
+        except Exception as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        url = f"{GITHUB_API_URL}/repos/{repo}/contents/{path}"
+        params = {}
+        if ref:
+            params["ref"] = ref
+
+        response = requests.get(
+            url,
+            headers=_github_headers(token),
+            params=params,
+            timeout=20,
+        )
+
+        if response.status_code == 404:
+            return Response({"detail": "Ruta no encontrada en el repositorio."}, status=status.HTTP_404_NOT_FOUND)
+        if response.status_code >= 400:
+            return Response({"detail": "Error al obtener contenidos.", "github_response": response.text}, status=status.HTTP_400_BAD_REQUEST)
+
+        data = response.json()
+
+        # Single file — decode base64 content
+        if isinstance(data, dict) and data.get("type") == "file":
+            import base64
+            raw_content = data.get("content", "")
+            try:
+                decoded = base64.b64decode(raw_content).decode("utf-8", errors="replace")
+            except Exception:
+                decoded = None
+            return Response({
+                "type": "file",
+                "name": data.get("name"),
+                "path": data.get("path"),
+                "size": data.get("size"),
+                "sha": data.get("sha"),
+                "html_url": data.get("html_url"),
+                "download_url": data.get("download_url"),
+                "content": decoded,
+            })
+
+        # Directory — return listing without file content
+        items = [
+            {
+                "type": item.get("type"),   # "file" or "dir"
+                "name": item.get("name"),
+                "path": item.get("path"),
+                "size": item.get("size"),
+                "sha": item.get("sha"),
+                "html_url": item.get("html_url"),
+            }
+            for item in (data if isinstance(data, list) else [])
+        ]
+        # Directories first, then files, both alphabetically
+        items.sort(key=lambda x: (0 if x["type"] == "dir" else 1, x["name"].lower()))
+        return Response({"type": "dir", "path": path or "/", "items": items})
+
+
+class TaskWarningListView(APIView):
+    @extend_schema(responses={200: TaskWarningSerializer(many=True)}, tags=["warnings"])
+    def get(self, request):
+        """
+        Retorna warnings de tareas.
+        Filtros: ?task_id=1  ?status=active|resolved  ?project_id=1
+        """
+        qs = TaskWarning.objects.select_related("task")
+        task_id = request.query_params.get("task_id")
+        warn_status = request.query_params.get("status")
+        project_id = request.query_params.get("project_id")
+
+        if task_id:
+            qs = qs.filter(task_id=task_id)
+        if warn_status:
+            qs = qs.filter(status=warn_status)
+        if project_id:
+            qs = qs.filter(
+                task__id_board__in=Board.objects.filter(id_project=project_id).values_list("id_board", flat=True)
+            )
+
+        serializer = TaskWarningSerializer(qs[:100], many=True)
+        return Response(serializer.data)
+
+
+class GithubAppDebugView(APIView):
+    """Temporary debug endpoint — remove after fixing private key issue."""
+    authentication_classes = []
+    permission_classes = []
+
+    def get(self, request):
+        import traceback
+        result = {
+            "github_app_id": settings.GITHUB_APP_ID or "(not set)",
+            "private_key_length": len(settings.GITHUB_APP_PRIVATE_KEY),
+            "private_key_starts_with": settings.GITHUB_APP_PRIVATE_KEY[:40] if settings.GITHUB_APP_PRIVATE_KEY else "(empty)",
+            "jwt_ok": False,
+            "jwt_error": None,
+        }
+        try:
+            _github_app_jwt()
+            result["jwt_ok"] = True
+        except Exception as exc:
+            result["jwt_error"] = str(exc)
+            result["traceback"] = traceback.format_exc()
+        return Response(result)
+
+
+class GithubConnectionStatusView(APIView):
+    @extend_schema(responses={200: dict, 401: dict}, tags=["github-app"])
+    def get(self, request):
+        """
+        Returns the GitHub connection status for the authenticated user.
+        The frontend should call this to decide whether to show 'Conectar con GitHub'.
+        """
+        user = request.user
+        connection = GithubConnection.objects.filter(user=user).first()
+        if not connection:
+            return Response({"connected": False, "github_login": None}, status=status.HTTP_200_OK)
+
+        now = datetime.now(timezone.utc)
+        token_expired = bool(connection.token_expires_at and connection.token_expires_at <= now)
+        refresh_expired = bool(
+            connection.refresh_token_expires_at and connection.refresh_token_expires_at <= now
+        ) if connection.refresh_token else True
+
+        if token_expired:
+            if refresh_expired:
+                return Response(
+                    {"connected": False, "github_login": connection.github_login, "reason": "token_expired"},
+                    status=status.HTTP_200_OK,
+                )
+            refreshed = _refresh_github_token(connection)
+            if not refreshed:
+                return Response(
+                    {"connected": False, "github_login": connection.github_login, "reason": "token_expired"},
+                    status=status.HTTP_200_OK,
+                )
+
+        return Response(
+            {"connected": True, "github_login": connection.github_login},
+            status=status.HTTP_200_OK,
+        )
+

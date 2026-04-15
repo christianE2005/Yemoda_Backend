@@ -6,22 +6,29 @@ from rest_framework.routers import DefaultRouter
 from apps.core.views import (
     ActivityLogViewSet,
     BoardViewSet,
+    GithubAppDebugView,
     GithubAppInstallStartView,
     GithubAppLinkInstallationView,
     GithubAppOauthCallbackView,
     GithubAppOauthStartView,
+    GithubCommitDiffView,
+    GithubConnectionStatusView,
     GithubCreateRepoView,
+    GithubPushListView,
     GithubPushWebhookView,
+    GithubRepoContentsView,
     LoginView,
     ProjectMemberViewSet,
     ProjectViewSet,
     RefreshView,
     RegisterView,
     RoleViewSet,
+    SystemRoleViewSet,
     TaskCommentViewSet,
     TaskPriorityViewSet,
     TaskStatusViewSet,
     TaskViewSet,
+    TaskWarningListView,
     UserAccountViewSet,
 )
 
@@ -29,6 +36,7 @@ router = DefaultRouter()
 router.register(r"user-accounts", UserAccountViewSet)
 router.register(r"projects", ProjectViewSet)
 router.register(r"roles", RoleViewSet)
+router.register(r"system-roles", SystemRoleViewSet)
 router.register(r"project-members", ProjectMemberViewSet)
 router.register(r"boards", BoardViewSet)
 router.register(r"task-statuses", TaskStatusViewSet)
@@ -48,7 +56,13 @@ urlpatterns = [
     path("api/github/app/oauth/start/", GithubAppOauthStartView.as_view(), name="github-app-oauth-start"),
     path("api/github/app/oauth/callback/", GithubAppOauthCallbackView.as_view(), name="github-app-oauth-callback"),
     path("api/github/app/install/link/", GithubAppLinkInstallationView.as_view(), name="github-app-install-link"),
+    path("api/github/debug/", GithubAppDebugView.as_view(), name="github-app-debug"),
     path("api/github/repos/", GithubCreateRepoView.as_view(), name="github-create-repo"),
+    path("api/github/connection/status/", GithubConnectionStatusView.as_view(), name="github-connection-status"),
     path("api/github/webhook/push/", GithubPushWebhookView.as_view(), name="github-push-webhook"),
+    path("api/github/pushes/", GithubPushListView.as_view(), name="github-push-list"),
+    path("api/github/commits/diff/", GithubCommitDiffView.as_view(), name="github-commit-diff"),
+    path("api/github/contents/", GithubRepoContentsView.as_view(), name="github-repo-contents"),
+    path("api/task-warnings/", TaskWarningListView.as_view(), name="task-warning-list"),
     path("api/", include(router.urls)),
 ]
