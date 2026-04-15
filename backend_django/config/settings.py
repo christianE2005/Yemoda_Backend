@@ -94,6 +94,16 @@ SPECTACULAR_SETTINGS = {
     "TITLE": "ABCDH Backend API",
     "DESCRIPTION": "API base con Django REST Framework",
     "VERSION": "1.0.0",
+    "SECURITY": [{"BearerAuth": []}],
+    "APPEND_COMPONENTS": {
+        "securitySchemes": {
+            "BearerAuth": {
+                "type": "http",
+                "scheme": "bearer",
+                "bearerFormat": "JWT",
+            }
+        }
+    },
 }
 
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", SECRET_KEY)

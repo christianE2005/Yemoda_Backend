@@ -34,6 +34,8 @@ class UserAccountSerializer(serializers.ModelSerializer):
 
 
 class ProjectSerializer(serializers.ModelSerializer):
+    created_by = serializers.PrimaryKeyRelatedField(read_only=True)
+
     class Meta:
         model = Project
         fields = "__all__"

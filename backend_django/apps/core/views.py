@@ -1242,3 +1242,12 @@ class GithubConnectionStatusView(APIView):
             status=status.HTTP_200_OK,
         )
 
+    @extend_schema(responses={200: dict}, tags=["github-app"])
+    def delete(self, request):
+        """Desvincula la cuenta de GitHub del usuario autenticado."""
+        user = request.user
+        deleted, _ = GithubConnection.objects.filter(user=user).delete()
+        if deleted:
+            return Response({"detail": "Cuenta de GitHub desvinculada correctamente."}, status=status.HTTP_200_OK)
+        return Response({"detail": "No había ninguna cuenta de GitHub vinculada."}, status=status.HTTP_404_NOT_FOUND)
+
