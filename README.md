@@ -140,8 +140,46 @@ El JWT contiene: `user_id`, `email`, `username`, `is_admin`, `system_role_id`.
 | POST | `/api/github/app/oauth/callback/` | ✅ | Completa OAuth y vincula cuenta GitHub al usuario |
 | POST | `/api/github/app/install/link/` | ✅ | Vincula una instalación GitHub App al usuario |
 | GET | `/api/github/connection/status/` | ✅ | Estado de la conexión GitHub del usuario autenticado |
-| POST | `/api/github/repos/` | ✅ | Crea repositorio en GitHub y configura webhook de push |
+| GET | `/api/github/repos/` | ✅ | Lista los repos creados por el usuario (persistidos en BD) |
+| POST | `/api/github/repos/` | ✅ | Crea repositorio en GitHub, configura webhook de push y lo persiste |
+| GET | `/api/github/pushes/` | ✅ | Lista push events recibidos (`?project_id=1` o `?repo=owner/repo`) |
+| GET | `/api/github/commits/diff/` | ✅ | Diff de un commit específico (`?repo=owner/repo&commit=SHA`) |
+| GET | `/api/github/contents/` | ✅ | Navega archivos del repo (`?repo=owner/repo&path=src&ref=main`) |
 | POST | `/api/github/webhook/push/` | ❌ | Receptor de webhooks push (validado por firma HMAC) |
+
+##### Parámetros de `/api/github/contents/`
+
+| Parámetro | Requerido | Descripción |
+|-----------|-----------|-------------|
+| `repo` | ✅ | `owner/nombre-repo` |
+| `path` | ❌ | Ruta dentro del repo (default: raíz) |
+| `ref` | ❌ | Branch, tag o SHA (default: branch principal) |
+
+Respuesta directorio:
+```json
+{ "type": "dir", "path": "src", "items": [
+  { "type": "dir", "name": "components", "path": "src/components" },
+  { "type": "file", "name": "main.py", "path": "src/main.py", "size": 1024 }
+]}
+```
+Respuesta archivo:
+```json
+{ "type": "file", "name": "main.py", "path": "src/main.py", "content": "def hello():..." }
+```
+
+#### Warnings de IA
+
+| Método | Endpoint | Auth | Descripción |
+|--------|----------|------|-------------|
+| GET | `/api/task-warnings/` | ✅ | Lista warnings generados por el agente de IA |
+
+##### Filtros de `/api/task-warnings/`
+
+| Parámetro | Descripción |
+|-----------|-------------|
+| `task_id` | Warnings de una tarea específica |
+| `status` | `active` o `resolved` |
+| `project_id` | Todos los warnings de un proyecto |
 
 #### Recursos principales (CRUD)
 
@@ -183,6 +221,9 @@ El JWT contiene: `user_id`, `email`, `username`, `is_admin`, `system_role_id`.
 | `activity_log` | Log de acciones por entidad y usuario |
 | `github_connection` | Token OAuth de GitHub del usuario con soporte de refresco |
 | `github_app_installation` | Instalaciones de la GitHub App por organización |
+| `github_repo` | Repositorios creados desde la app (persistidos para listado) |
+| `github_push_event` | Historial de push events recibidos con commits |
+| `task_warning` | Warnings activos/resueltos generados por el agente de IA |
 
 ---
 
@@ -228,9 +269,12 @@ Copia `backend_fastapi/.env.example` → `backend_fastapi/.env`.
 2. FastAPI valida la firma con `GITHUB_APP_WEBHOOK_SECRET`
 3. En background: obtiene el diff del commit via GitHub App installation token
 4. Consulta las tareas activas del proyecto vinculado por `github_repo_full_name`
-5. Envía el diff + user stories a Gemini para análisis de cobertura
-6. Para tareas con cobertura `full` o `partial`: mueve el estado a **Review**
-7. Agrega un comentario automático en la tarea con el análisis y sugerencias
+5. Carga los **warnings activos** de cada tarea y los incluye en el prompt
+6. Envía el diff + user stories + warnings a Gemini para análisis
+7. Para tareas detectadas: mueve el estado a **Review**
+8. **Warnings nuevos**: si el código es parcial, crea `TaskWarning` con `status=active`
+9. **Warnings resueltos**: si el nuevo código soluciona un warning previo, lo marca como `resolved`
+10. Agrega un comentario automático en la tarea con el análisis completo
 
 ---
 
