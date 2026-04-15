@@ -16,6 +16,7 @@ from apps.core.views import (
     GithubCreateRepoView,
     GithubPushListView,
     GithubPushWebhookView,
+    GithubRepoContentsView,
     LoginView,
     ProjectMemberViewSet,
     ProjectViewSet,
@@ -61,6 +62,7 @@ urlpatterns = [
     path("api/github/webhook/push/", GithubPushWebhookView.as_view(), name="github-push-webhook"),
     path("api/github/pushes/", GithubPushListView.as_view(), name="github-push-list"),
     path("api/github/commits/diff/", GithubCommitDiffView.as_view(), name="github-commit-diff"),
+    path("api/github/contents/", GithubRepoContentsView.as_view(), name="github-repo-contents"),
     path("api/task-warnings/", TaskWarningListView.as_view(), name="task-warning-list"),
     path("api/", include(router.urls)),
 ]

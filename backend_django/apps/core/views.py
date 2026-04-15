@@ -1072,7 +1072,90 @@ class GithubCommitDiffView(APIView):
         )
 
 
-class TaskWarningListView(APIView):
+class GithubRepoContentsView(APIView):
+    @extend_schema(responses={200: dict, 400: dict}, tags=["github-app"])
+    def get(self, request):
+        """
+        Navega los archivos de un repositorio usando la GitHub Contents API.
+
+        Parámetros requeridos: ?repo=owner/repo
+        Parámetros opcionales:
+          ?path=src/components   (subcarpeta, default raíz)
+          ?ref=main              (branch/tag/SHA, default branch por defecto del repo)
+        """
+        repo = request.query_params.get("repo", "").strip()
+        path = request.query_params.get("path", "").strip("/")
+        ref = request.query_params.get("ref", "").strip()
+
+        if not repo:
+            return Response({"detail": "El parámetro 'repo' es requerido."}, status=status.HTTP_400_BAD_REQUEST)
+
+        org_login = repo.split("/")[0] if "/" in repo else repo
+        installation = GithubAppInstallation.objects.filter(account_login__iexact=org_login).first()
+        if not installation:
+            return Response(
+                {"detail": f"No se encontró instalación de GitHub App para '{org_login}'."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            token = _installation_access_token(installation.installation_id)
+        except Exception as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        url = f"{GITHUB_API_URL}/repos/{repo}/contents/{path}"
+        params = {}
+        if ref:
+            params["ref"] = ref
+
+        response = requests.get(
+            url,
+            headers=_github_headers(token),
+            params=params,
+            timeout=20,
+        )
+
+        if response.status_code == 404:
+            return Response({"detail": "Ruta no encontrada en el repositorio."}, status=status.HTTP_404_NOT_FOUND)
+        if response.status_code >= 400:
+            return Response({"detail": "Error al obtener contenidos.", "github_response": response.text}, status=status.HTTP_400_BAD_REQUEST)
+
+        data = response.json()
+
+        # Single file — decode base64 content
+        if isinstance(data, dict) and data.get("type") == "file":
+            import base64
+            raw_content = data.get("content", "")
+            try:
+                decoded = base64.b64decode(raw_content).decode("utf-8", errors="replace")
+            except Exception:
+                decoded = None
+            return Response({
+                "type": "file",
+                "name": data.get("name"),
+                "path": data.get("path"),
+                "size": data.get("size"),
+                "sha": data.get("sha"),
+                "html_url": data.get("html_url"),
+                "download_url": data.get("download_url"),
+                "content": decoded,
+            })
+
+        # Directory — return listing without file content
+        items = [
+            {
+                "type": item.get("type"),   # "file" or "dir"
+                "name": item.get("name"),
+                "path": item.get("path"),
+                "size": item.get("size"),
+                "sha": item.get("sha"),
+                "html_url": item.get("html_url"),
+            }
+            for item in (data if isinstance(data, list) else [])
+        ]
+        # Directories first, then files, both alphabetically
+        items.sort(key=lambda x: (0 if x["type"] == "dir" else 1, x["name"].lower()))
+        return Response({"type": "dir", "path": path or "/", "items": items})
     @extend_schema(responses={200: TaskWarningSerializer(many=True)}, tags=["warnings"])
     def get(self, request):
         """
