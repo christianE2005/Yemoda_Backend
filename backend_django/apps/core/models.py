@@ -322,3 +322,32 @@ class TaskWarning(models.Model):
     class Meta:
         db_table = "task_warning"
         ordering = ["-created_at"]
+
+
+class GithubRepo(models.Model):
+    id_repo = models.BigAutoField(primary_key=True)
+    user = models.ForeignKey(
+        UserAccount,
+        on_delete=models.CASCADE,
+        db_column="id_user",
+        related_name="github_repos",
+    )
+    project = models.ForeignKey(
+        Project,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        db_column="id_project",
+        related_name="github_repos",
+    )
+    github_repo_id = models.BigIntegerField(unique=True)
+    full_name = models.CharField(max_length=255)
+    name = models.CharField(max_length=150)
+    owner = models.CharField(max_length=150)
+    private = models.BooleanField(default=True)
+    html_url = models.CharField(max_length=500)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "github_repo"
+        ordering = ["-created_at"]

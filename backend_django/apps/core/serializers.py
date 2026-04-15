@@ -4,6 +4,7 @@ from .models import (
     ActivityLog,
     Board,
     GithubPushEvent,
+    GithubRepo,
     Project,
     ProjectMember,
     Role,
@@ -95,6 +96,12 @@ class GithubPushEventSerializer(serializers.ModelSerializer):
 class TaskWarningSerializer(serializers.ModelSerializer):
     class Meta:
         model = TaskWarning
+        fields = "__all__"
+
+
+class GithubRepoSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = GithubRepo
         fields = "__all__"
 
 

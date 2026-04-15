@@ -26,6 +26,7 @@ from .models import (
     GithubAppInstallation,
     GithubConnection,
     GithubPushEvent,
+    GithubRepo,
     Project,
     ProjectMember,
     Role,
@@ -44,6 +45,7 @@ from .serializers import (
     GithubCreateRepoSerializer,
     GithubOauthCallbackSerializer,
     GithubPushEventSerializer,
+    GithubRepoSerializer,
     LoginSerializer,
     ProjectMemberSerializer,
     ProjectSerializer,
@@ -739,6 +741,16 @@ class GithubAppLinkInstallationView(APIView):
 
 
 class GithubCreateRepoView(APIView):
+    @extend_schema(responses={200: GithubRepoSerializer(many=True)}, tags=["github-app"])
+    def get(self, request):
+        """Lista los repositorios creados por el usuario autenticado."""
+        user = request.user
+        qs = GithubRepo.objects.filter(user=user)
+        project_id = request.query_params.get("project_id")
+        if project_id:
+            qs = qs.filter(project_id=project_id)
+        return Response(GithubRepoSerializer(qs, many=True).data)
+
     @extend_schema(request=GithubCreateRepoSerializer, responses={201: dict, 400: dict, 404: dict}, tags=["github-app"])
     def post(self, request):
         serializer = GithubCreateRepoSerializer(data=request.data)
@@ -815,10 +827,26 @@ class GithubCreateRepoView(APIView):
         repo = repo_response.json()
 
         project_id = data.get("project_id")
+        project_obj = None
         if project_id:
             Project.objects.filter(id_project=project_id).update(
                 github_repo_full_name=repo.get("full_name")
             )
+            project_obj = Project.objects.filter(id_project=project_id).first()
+
+        # Always persist the repo so it can be listed later
+        GithubRepo.objects.update_or_create(
+            github_repo_id=repo["id"],
+            defaults={
+                "user": user,
+                "project": project_obj,
+                "full_name": repo.get("full_name", ""),
+                "name": repo.get("name", ""),
+                "owner": (repo.get("owner") or {}).get("login", owner or ""),
+                "private": repo.get("private", True),
+                "html_url": repo.get("html_url", ""),
+            },
+        )
 
         webhook_url = data.get("webhook_url") or settings.GITHUB_APP_WEBHOOK_TARGET_URL
         if not webhook_url:
