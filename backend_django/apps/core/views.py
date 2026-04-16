@@ -309,12 +309,16 @@ class ProjectViewSet(viewsets.ModelViewSet):
 class RoleViewSet(viewsets.ModelViewSet):
     queryset = Role.objects.all()
     serializer_class = RoleSerializer
+    authentication_classes = []
+    permission_classes = [AllowAny]
 
 
 class SystemRoleViewSet(viewsets.ReadOnlyModelViewSet):
     """System-level roles (Admin, User). Read-only — managed via migrations/DB."""
     queryset = SystemRole.objects.all()
     serializer_class = SystemRoleSerializer
+    authentication_classes = []
+    permission_classes = [AllowAny]
 
 
 class ProjectMemberViewSet(viewsets.ModelViewSet):
@@ -415,14 +419,22 @@ class RegisterView(APIView):
         email = serializer.validated_data["email"]
         username = serializer.validated_data["username"]
         password = serializer.validated_data["password"]
+        system_role_id = serializer.validated_data.get("system_role_id")
 
         if UserAccount.objects.filter(email=email).exists():
             return Response({"detail": "El correo ya esta registrado."}, status=status.HTTP_400_BAD_REQUEST)
+
+        system_role = None
+        if system_role_id:
+            system_role = SystemRole.objects.filter(pk=system_role_id).first()
+            if not system_role:
+                return Response({"detail": "El rol indicado no existe."}, status=status.HTTP_400_BAD_REQUEST)
 
         user = UserAccount.objects.create(
             email=email,
             username=username,
             password_hash=make_password(password),
+            system_role=system_role,
         )
         return Response(UserAccountSerializer(user).data, status=status.HTTP_201_CREATED)
 

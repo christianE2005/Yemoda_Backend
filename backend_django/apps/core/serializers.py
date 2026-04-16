@@ -111,6 +111,7 @@ class RegisterSerializer(serializers.Serializer):
     email = serializers.EmailField(max_length=150)
     username = serializers.CharField(max_length=100)
     password = serializers.CharField(write_only=True, min_length=8)
+    system_role_id = serializers.IntegerField(required=False, help_text="ID del rol del sistema (opcional).")
 
 
 class LoginSerializer(serializers.Serializer):
