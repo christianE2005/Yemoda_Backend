@@ -8,6 +8,7 @@ from .models import (
     Project,
     ProjectMember,
     Role,
+    SystemRole,
     Task,
     TaskComment,
     TaskPriority,
@@ -16,6 +17,7 @@ from .models import (
 )
 
 admin.site.register(UserAccount)
+admin.site.register(SystemRole)
 admin.site.register(Project)
 admin.site.register(Role)
 admin.site.register(ProjectMember)

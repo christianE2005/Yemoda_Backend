@@ -272,6 +272,11 @@ def _user_from_bearer_token(request) -> UserAccount | None:
 class UserAccountViewSet(viewsets.ModelViewSet):
     queryset = UserAccount.objects.all()
     serializer_class = UserAccountSerializer
+    permission_classes = [IsAdminUser]
+
+    def perform_create(self, serializer):
+        """Admin creates users with hashed passwords"""
+        serializer.save()
 
 
 class ProjectViewSet(viewsets.ModelViewSet):
@@ -388,34 +393,6 @@ class TaskCommentViewSet(viewsets.ModelViewSet):
 class ActivityLogViewSet(viewsets.ModelViewSet):
     queryset = ActivityLog.objects.all()
     serializer_class = ActivityLogSerializer
-
-
-class RegisterView(APIView):
-    permission_classes = [AllowAny]
-
-    @extend_schema(
-        request=RegisterSerializer,
-        responses={201: UserAccountSerializer, 400: dict},
-        tags=["auth"],
-        auth=[],
-    )
-    def post(self, request):
-        serializer = RegisterSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-
-        email = serializer.validated_data["email"]
-        username = serializer.validated_data["username"]
-        password = serializer.validated_data["password"]
-
-        if UserAccount.objects.filter(email=email).exists():
-            return Response({"detail": "El correo ya esta registrado."}, status=status.HTTP_400_BAD_REQUEST)
-
-        user = UserAccount.objects.create(
-            email=email,
-            username=username,
-            password_hash=make_password(password),
-        )
-        return Response(UserAccountSerializer(user).data, status=status.HTTP_201_CREATED)
 
 
 class LoginView(APIView):
