@@ -5,11 +5,13 @@ class SystemRole(models.Model):
     ADMIN = "Admin"
     USER = "User"
     STAKEHOLDER = "Stakeholder"
+    PROJECT_MANAGER = "Project Manager"
 
     ROLE_CHOICES = [
         (ADMIN, "Admin"),
         (USER, "User"),
         (STAKEHOLDER, "Stakeholder"),
+        (PROJECT_MANAGER, "Project Manager"),
     ]
 
     id_system_role = models.BigAutoField(primary_key=True)
