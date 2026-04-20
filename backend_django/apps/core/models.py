@@ -51,7 +51,7 @@ class UserAccount(models.Model):
 
     @property
     def is_admin(self):
-        return self.system_role_id == 2
+        return self.system_role is not None and self.system_role.name == SystemRole.ADMIN
 
 
 class Project(models.Model):
