@@ -284,32 +284,46 @@ class ProjectViewSet(viewsets.ModelViewSet):
     serializer_class = ProjectSerializer
 
     def get_queryset(self):
-        """Filter projects to show only those where the user is a member or the creator."""
         user = self.request.user
         return Project.objects.filter(
             Q(members__user=user) | Q(created_by=user)
         ).distinct()
 
+    def create(self, request, *args, **kwargs):
+        import traceback
+        try:
+            return super().create(request, *args, **kwargs)
+        except Exception as e:
+            return Response(
+                {"error": str(e), "detail": traceback.format_exc()},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
     def perform_create(self, serializer):
-        """Automatically set the creator and add them as a member of the project."""
         project = serializer.save(created_by=self.request.user)
-        # Create membership record for the creator (Simplified approach: role=None)
-        ProjectMember.objects.get_or_create(
-            project=project,
-            user=self.request.user,
-            defaults={"role": None}
-        )
+        try:
+            ProjectMember.objects.get_or_create(
+                project=project,
+                user=self.request.user,
+                defaults={"role": None},
+            )
+        except Exception:
+            pass
 
 
 class RoleViewSet(viewsets.ModelViewSet):
     queryset = Role.objects.all()
     serializer_class = RoleSerializer
+    authentication_classes = []
+    permission_classes = [AllowAny]
 
 
 class SystemRoleViewSet(viewsets.ReadOnlyModelViewSet):
     """System-level roles (Admin, User). Read-only — managed via migrations/DB."""
     queryset = SystemRole.objects.all()
     serializer_class = SystemRoleSerializer
+    authentication_classes = []
+    permission_classes = [AllowAny]
 
 
 class ProjectMemberViewSet(viewsets.ModelViewSet):
@@ -393,6 +407,41 @@ class TaskCommentViewSet(viewsets.ModelViewSet):
 class ActivityLogViewSet(viewsets.ModelViewSet):
     queryset = ActivityLog.objects.all()
     serializer_class = ActivityLogSerializer
+
+
+class RegisterView(APIView):
+    permission_classes = [AllowAny]
+
+    @extend_schema(
+        request=RegisterSerializer,
+        responses={201: UserAccountSerializer, 400: dict},
+        tags=["auth"],
+    )
+    def post(self, request):
+        serializer = RegisterSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        email = serializer.validated_data["email"]
+        username = serializer.validated_data["username"]
+        password = serializer.validated_data["password"]
+        system_role_id = serializer.validated_data.get("system_role_id")
+
+        if UserAccount.objects.filter(email=email).exists():
+            return Response({"detail": "El correo ya esta registrado."}, status=status.HTTP_400_BAD_REQUEST)
+
+        system_role = None
+        if system_role_id:
+            system_role = SystemRole.objects.filter(pk=system_role_id).first()
+            if not system_role:
+                return Response({"detail": "El rol indicado no existe."}, status=status.HTTP_400_BAD_REQUEST)
+
+        user = UserAccount.objects.create(
+            email=email,
+            username=username,
+            password_hash=make_password(password),
+            system_role=system_role,
+        )
+        return Response(UserAccountSerializer(user).data, status=status.HTTP_201_CREATED)
 
 
 class LoginView(APIView):
@@ -1220,4 +1269,13 @@ class GithubConnectionStatusView(APIView):
             {"connected": True, "github_login": connection.github_login},
             status=status.HTTP_200_OK,
         )
+
+    @extend_schema(responses={200: dict}, tags=["github-app"])
+    def delete(self, request):
+        """Desvincula la cuenta de GitHub del usuario autenticado."""
+        user = request.user
+        deleted, _ = GithubConnection.objects.filter(user=user).delete()
+        if deleted:
+            return Response({"detail": "Cuenta de GitHub desvinculada correctamente."}, status=status.HTTP_200_OK)
+        return Response({"detail": "No había ninguna cuenta de GitHub vinculada."}, status=status.HTTP_404_NOT_FOUND)
 

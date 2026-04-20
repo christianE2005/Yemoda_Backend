@@ -49,6 +49,8 @@ class UserAccountSerializer(serializers.ModelSerializer):
 
 
 class ProjectSerializer(serializers.ModelSerializer):
+    created_by = serializers.PrimaryKeyRelatedField(read_only=True)
+
     class Meta:
         model = Project
         fields = "__all__"
@@ -129,6 +131,7 @@ class RegisterSerializer(serializers.Serializer):
         required=False,
         help_text="User's system role. Choices: User (default) or Stakeholder"
     )
+    system_role_id = serializers.IntegerField(required=False, help_text="ID del rol del sistema (opcional).")
 
 
 class LoginSerializer(serializers.Serializer):
