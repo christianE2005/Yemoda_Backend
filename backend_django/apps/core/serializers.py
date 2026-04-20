@@ -1,4 +1,5 @@
 from rest_framework import serializers
+from django.contrib.auth.hashers import make_password
 
 from .models import (
     ActivityLog,
@@ -25,12 +26,26 @@ class SystemRoleSerializer(serializers.ModelSerializer):
 
 
 class UserAccountSerializer(serializers.ModelSerializer):
-    password_hash = serializers.CharField(write_only=True, required=False)
+    password = serializers.CharField(write_only=True, required=False, min_length=8)
     system_role_name = serializers.CharField(source="system_role.name", read_only=True)
 
     class Meta:
         model = UserAccount
-        fields = "__all__"
+        fields = ["id_user", "email", "username", "password", "system_role", "system_role_name", "created_at"]
+
+    def create(self, validated_data):
+        password = validated_data.pop("password", None)
+        user = UserAccount(**validated_data)
+        if password:
+            user.password_hash = make_password(password)
+        user.save()
+        return user
+
+    def update(self, instance, validated_data):
+        password = validated_data.pop("password", None)
+        if password:
+            instance.password_hash = make_password(password)
+        return super().update(instance, validated_data)
 
 
 class ProjectSerializer(serializers.ModelSerializer):
@@ -111,6 +126,11 @@ class RegisterSerializer(serializers.Serializer):
     email = serializers.EmailField(max_length=150)
     username = serializers.CharField(max_length=100)
     password = serializers.CharField(write_only=True, min_length=8)
+    role = serializers.ChoiceField(
+        choices=["User", "Stakeholder"],
+        required=False,
+        help_text="User's system role. Choices: User (default) or Stakeholder"
+    )
     system_role_id = serializers.IntegerField(required=False, help_text="ID del rol del sistema (opcional).")
 
 

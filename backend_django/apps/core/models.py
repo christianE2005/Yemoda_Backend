@@ -2,8 +2,18 @@ from django.db import models
 
 
 class SystemRole(models.Model):
+    ADMIN = "Admin"
+    USER = "User"
+    STAKEHOLDER = "Stakeholder"
+
+    ROLE_CHOICES = [
+        (ADMIN, "Admin"),
+        (USER, "User"),
+        (STAKEHOLDER, "Stakeholder"),
+    ]
+
     id_system_role = models.BigAutoField(primary_key=True)
-    name = models.CharField(max_length=50, unique=True)
+    name = models.CharField(max_length=50, unique=True, choices=ROLE_CHOICES)
     description = models.TextField(null=True, blank=True)
 
     class Meta:
@@ -41,7 +51,7 @@ class UserAccount(models.Model):
 
     @property
     def is_admin(self):
-        return self.system_role_id == 1
+        return self.system_role_id == 2
 
 
 class Project(models.Model):

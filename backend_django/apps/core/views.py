@@ -272,6 +272,11 @@ def _user_from_bearer_token(request) -> UserAccount | None:
 class UserAccountViewSet(viewsets.ModelViewSet):
     queryset = UserAccount.objects.all()
     serializer_class = UserAccountSerializer
+    permission_classes = [IsAdminUser]
+
+    def perform_create(self, serializer):
+        """Admin creates users with hashed passwords"""
+        serializer.save()
 
 
 class ProjectViewSet(viewsets.ModelViewSet):
@@ -446,6 +451,7 @@ class LoginView(APIView):
         request=LoginSerializer,
         responses={200: dict, 401: dict},
         tags=["auth"],
+        auth=[],
     )
     def post(self, request):
         serializer = LoginSerializer(data=request.data)
