@@ -17,6 +17,7 @@ from apps.core.views import (
     GithubPushListView,
     GithubPushWebhookView,
     GithubRepoContentsView,
+    HealthCheckView,
     LoginView,
     ProjectMemberViewSet,
     ProjectViewSet,
@@ -46,6 +47,7 @@ router.register(r"activity-logs", ActivityLogViewSet)
 
 urlpatterns = [
     path("admin/", admin.site.urls),
+    path("api/health/", HealthCheckView.as_view(), name="health"),
     path("api/schema/", SpectacularAPIView.as_view(), name="schema"),
     path("api/docs/", SpectacularSwaggerView.as_view(url_name="schema"), name="swagger-ui"),
     path("api/auth/login/", LoginView.as_view(), name="auth-login"),

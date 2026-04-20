@@ -1211,6 +1211,14 @@ class TaskWarningListView(APIView):
         return Response(serializer.data)
 
 
+class HealthCheckView(APIView):
+    authentication_classes = []
+    permission_classes = []
+
+    def get(self, request):
+        return Response({"status": "ok"}, status=status.HTTP_200_OK)
+
+
 class GithubAppDebugView(APIView):
     """Temporary debug endpoint — remove after fixing private key issue."""
     authentication_classes = []
