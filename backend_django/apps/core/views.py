@@ -34,6 +34,7 @@ from .models import (
     Task,
     TaskComment,
     TaskPriority,
+    TaskPushMatch,
     TaskStatus,
     TaskWarning,
     UserAccount,
@@ -55,6 +56,7 @@ from .serializers import (
     SystemRoleSerializer,
     TaskCommentSerializer,
     TaskPrioritySerializer,
+    TaskPushMatchSerializer,
     TaskSerializer,
     TaskStatusSerializer,
     TaskWarningSerializer,
@@ -1260,6 +1262,30 @@ class TaskWarningListView(APIView):
             )
 
         serializer = TaskWarningSerializer(qs[:100], many=True)
+        return Response(serializer.data)
+
+
+class TaskHistoryView(APIView):
+    @extend_schema(
+        responses={200: TaskPushMatchSerializer(many=True)},
+        tags=["tasks"],
+        summary="Get push history for a task",
+        description=(
+            "Returns all GitHub push matches linked to a user story, including the relevant "
+            "code snippet, coverage assessment and reason provided by the AI agent."
+        ),
+    )
+    def get(self, request, task_id: int):
+        task = Task.objects.filter(pk=task_id).first()
+        if not task:
+            return Response({"detail": "Task not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        matches = (
+            TaskPushMatch.objects.select_related("push")
+            .filter(task_id=task_id)
+            .order_by("-created_at")
+        )
+        serializer = TaskPushMatchSerializer(matches, many=True)
         return Response(serializer.data)
 
 

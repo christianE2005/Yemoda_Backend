@@ -26,6 +26,7 @@ from apps.core.views import (
     RoleViewSet,
     SystemRoleViewSet,
     TaskCommentViewSet,
+    TaskHistoryView,
     TaskPriorityViewSet,
     TaskStatusViewSet,
     TaskViewSet,
@@ -65,6 +66,7 @@ urlpatterns = [
     path("api/github/commits/diff/", GithubCommitDiffView.as_view(), name="github-commit-diff"),
     path("api/github/contents/", GithubRepoContentsView.as_view(), name="github-repo-contents"),
     path("api/task-warnings/", TaskWarningListView.as_view(), name="task-warning-list"),
+    path("api/tasks/<int:task_id>/history/", TaskHistoryView.as_view(), name="task-push-history"),
     path("api/projects/<int:project_id>/members/", ProjectMembersView.as_view(), name="project-members"),
     path("api/", include(router.urls)),
 ]

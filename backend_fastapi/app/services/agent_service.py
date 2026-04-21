@@ -22,6 +22,7 @@ For each matched story:
 2. If partial, provide concrete, actionable suggestions about what is missing — these become new warnings.
 3. Check the active warnings list: if the new code resolves any existing warning for that story, list its ID in "resolved_warning_ids".
 4. Only flag NEW warnings that are not already listed in the active warnings.
+5. Extract the most relevant code snippet from the diff that directly addresses this story. Include the file path and the changed lines. Keep it under 50 lines.
 
 Respond ONLY with valid JSON using this exact format:
 {{
@@ -31,6 +32,7 @@ Respond ONLY with valid JSON using this exact format:
       "story_title": "<string>",
       "coverage": "full",
       "reason": "<why this story is addressed by the diff>",
+      "code_snippet": "<relevant diff lines with file path, max 50 lines>",
       "new_warnings": [],
       "resolved_warning_ids": []
     }},
@@ -39,6 +41,7 @@ Respond ONLY with valid JSON using this exact format:
       "story_title": "<string>",
       "coverage": "partial",
       "reason": "<why this story is only partially addressed>",
+      "code_snippet": "<relevant diff lines with file path, max 50 lines>",
       "new_warnings": ["<specific issue 1, e.g. JWT authentication not implemented>", "<specific issue 2>"],
       "resolved_warning_ids": [<warning_id_if_resolved>]
     }}

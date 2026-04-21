@@ -320,6 +320,14 @@ class TaskWarning(models.Model):
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_ACTIVE)
     created_at = models.DateTimeField(auto_now_add=True)
     resolved_at = models.DateTimeField(null=True, blank=True)
+    created_in_push = models.ForeignKey(
+        GithubPushEvent,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        db_column="id_push_created",
+        related_name="created_warnings",
+    )
     resolved_in_push = models.ForeignKey(
         GithubPushEvent,
         on_delete=models.SET_NULL,
@@ -332,6 +340,38 @@ class TaskWarning(models.Model):
     class Meta:
         db_table = "task_warning"
         ordering = ["-created_at"]
+
+
+class TaskPushMatch(models.Model):
+    COVERAGE_FULL = "full"
+    COVERAGE_PARTIAL = "partial"
+    COVERAGE_CHOICES = [
+        (COVERAGE_FULL, "Full"),
+        (COVERAGE_PARTIAL, "Partial"),
+    ]
+
+    id_match = models.BigAutoField(primary_key=True)
+    task = models.ForeignKey(
+        Task,
+        on_delete=models.CASCADE,
+        db_column="id_task",
+        related_name="push_matches",
+    )
+    push = models.ForeignKey(
+        GithubPushEvent,
+        on_delete=models.CASCADE,
+        db_column="id_push",
+        related_name="task_matches",
+    )
+    coverage = models.CharField(max_length=10, choices=COVERAGE_CHOICES, default=COVERAGE_PARTIAL)
+    reason = models.TextField(null=True, blank=True)
+    code_snippet = models.TextField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "task_push_match"
+        ordering = ["-created_at"]
+        unique_together = ("task", "push")
 
 
 class GithubRepo(models.Model):

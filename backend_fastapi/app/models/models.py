@@ -1,4 +1,4 @@
-from sqlalchemy import Date, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import JSON, Date, DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -160,6 +160,22 @@ class ActivityLog(Base):
     created_at: Mapped[DateTime] = mapped_column(DateTime, server_default=func.now())
 
 
+class GithubPushEvent(Base):
+    __tablename__ = "github_push_event"
+
+    id_push: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    id_project: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("project.id_project", ondelete="CASCADE"),
+        nullable=True,
+    )
+    repo_full_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    ref: Mapped[str] = mapped_column(String(255), nullable=False)
+    pusher: Mapped[str | None] = mapped_column(String(150), nullable=True)
+    commits: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    received_at: Mapped[DateTime] = mapped_column(DateTime, server_default=func.now())
+
+
 class TaskWarning(Base):
     __tablename__ = "task_warning"
 
@@ -173,4 +189,25 @@ class TaskWarning(Base):
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
     created_at: Mapped[DateTime] = mapped_column(DateTime, server_default=func.now())
     resolved_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+    id_push_created: Mapped[int | None] = mapped_column(Integer, nullable=True)
     id_push_resolved: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class TaskPushMatch(Base):
+    __tablename__ = "task_push_match"
+
+    id_match: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    id_task: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("task.id_task", ondelete="CASCADE"),
+        nullable=False,
+    )
+    id_push: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("github_push_event.id_push", ondelete="CASCADE"),
+        nullable=False,
+    )
+    coverage: Mapped[str] = mapped_column(String(10), nullable=False, default="partial")
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    code_snippet: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[DateTime] = mapped_column(DateTime, server_default=func.now())

@@ -13,6 +13,7 @@ from .models import (
     Task,
     TaskComment,
     TaskPriority,
+    TaskPushMatch,
     TaskStatus,
     TaskWarning,
     UserAccount,
@@ -159,3 +160,26 @@ class GithubCreateRepoSerializer(serializers.Serializer):
 class GithubAppLinkInstallationSerializer(serializers.Serializer):
     user_id = serializers.IntegerField(min_value=1)
     installation_id = serializers.IntegerField(min_value=1)
+
+
+class TaskPushMatchSerializer(serializers.ModelSerializer):
+    push_ref = serializers.CharField(source="push.ref", read_only=True)
+    push_pusher = serializers.CharField(source="push.pusher", read_only=True, allow_null=True)
+    push_received_at = serializers.DateTimeField(source="push.received_at", read_only=True)
+    push_repo = serializers.CharField(source="push.repo_full_name", read_only=True)
+    push_commits = serializers.JSONField(source="push.commits", read_only=True)
+
+    class Meta:
+        model = TaskPushMatch
+        fields = [
+            "id_match",
+            "coverage",
+            "reason",
+            "code_snippet",
+            "created_at",
+            "push_ref",
+            "push_pusher",
+            "push_received_at",
+            "push_repo",
+            "push_commits",
+        ]
