@@ -446,7 +446,7 @@ class TaskViewSet(viewsets.ModelViewSet):
         user_project_ids = Project.objects.filter(
             Q(members__user=user) | Q(created_by=user)
         ).values_list('id_project', flat=True)
-        qs = Task.objects.filter(board__id_project__in=user_project_ids)
+        qs = Task.objects.filter(board__project_id__in=user_project_ids)
 
         board_id = self.request.query_params.get('board')
         if board_id is not None:
@@ -454,7 +454,7 @@ class TaskViewSet(viewsets.ModelViewSet):
 
         project_id = self.request.query_params.get('project')
         if project_id is not None:
-            qs = qs.filter(board__id_project=project_id)
+            qs = qs.filter(board__project_id=project_id)
 
         return qs.distinct()
 
