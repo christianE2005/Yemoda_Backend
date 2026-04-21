@@ -1295,12 +1295,26 @@ class GithubAppDebugView(APIView):
 
 
 class GithubConnectionStatusView(APIView):
-    @extend_schema(responses={200: dict, 401: dict}, tags=["github-app"])
+    @extend_schema(
+        summary="Estado de conexión con GitHub",
+        description=(
+            "Devuelve si el usuario autenticado tiene una cuenta de GitHub vinculada. "
+            "El frontend usa esto para decidir si mostrar el botón 'Conectar con GitHub'. "
+            "Si el token está expirado pero el refresh token es válido, lo renueva automáticamente."
+        ),
+        responses={
+            200: {
+                "type": "object",
+                "properties": {
+                    "connected": {"type": "boolean"},
+                    "github_login": {"type": "string", "nullable": True},
+                    "reason": {"type": "string", "nullable": True, "description": "Solo presente si connected=false. Valor posible: 'token_expired'"},
+                },
+            }
+        },
+        tags=["github-app"],
+    )
     def get(self, request):
-        """
-        Returns the GitHub connection status for the authenticated user.
-        The frontend should call this to decide whether to show 'Conectar con GitHub'.
-        """
         user = request.user
         connection = GithubConnection.objects.filter(user=user).first()
         if not connection:
@@ -1330,7 +1344,29 @@ class GithubConnectionStatusView(APIView):
             status=status.HTTP_200_OK,
         )
 
-    @extend_schema(responses={200: dict}, tags=["github-app"])
+    @extend_schema(
+        summary="Desvincular cuenta de GitHub",
+        description=(
+            "Elimina la conexión de GitHub del usuario autenticado. "
+            "No requiere body. El usuario se identifica por el JWT del header Authorization. "
+            "Después de esta operación, el usuario deberá volver a conectar su cuenta de GitHub."
+        ),
+        responses={
+            200: {
+                "type": "object",
+                "properties": {
+                    "detail": {"type": "string", "example": "Cuenta de GitHub desvinculada correctamente."}
+                },
+            },
+            404: {
+                "type": "object",
+                "properties": {
+                    "detail": {"type": "string", "example": "No había ninguna cuenta de GitHub vinculada."}
+                },
+            },
+        },
+        tags=["github-app"],
+    )
     def delete(self, request):
         """Desvincula la cuenta de GitHub del usuario autenticado."""
         user = request.user
