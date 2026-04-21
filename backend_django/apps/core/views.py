@@ -32,6 +32,7 @@ from .models import (
     Role,
     SystemRole,
     Task,
+    TaskAssignment,
     TaskComment,
     TaskPriority,
     TaskStatus,
@@ -53,6 +54,7 @@ from .serializers import (
     RegisterSerializer,
     RoleSerializer,
     SystemRoleSerializer,
+    TaskAssignmentSerializer,
     TaskCommentSerializer,
     TaskPrioritySerializer,
     TaskSerializer,
@@ -304,7 +306,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
             )
 
     def perform_create(self, serializer):
-        project = serializer.save(created_by=self.request.user)
+        project = serializer.save(created_by=self.request.user, status=Project.PLANNING)
         try:
             ProjectMember.objects.get_or_create(
                 project=project,
@@ -467,6 +469,24 @@ class TaskCommentViewSet(viewsets.ModelViewSet):
         task_id = self.request.query_params.get('task')
         if task_id is not None:
             qs = qs.filter(task_id=task_id)
+        return qs
+
+
+class TaskAssignmentViewSet(viewsets.ModelViewSet):
+    queryset = TaskAssignment.objects.all()
+    serializer_class = TaskAssignmentSerializer
+
+    def get_queryset(self):
+        """Filter assignments by ?task= or ?user= query params."""
+        qs = TaskAssignment.objects.all()
+        task_id = self.request.query_params.get('task')
+        user_id = self.request.query_params.get('user')
+        
+        if task_id is not None:
+            qs = qs.filter(task_id=task_id)
+        if user_id is not None:
+            qs = qs.filter(assigned_to_id=user_id)
+        
         return qs
 
 
