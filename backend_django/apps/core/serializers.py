@@ -11,6 +11,7 @@ from .models import (
     Role,
     SystemRole,
     Task,
+    TaskAssignment,
     TaskComment,
     TaskPriority,
     TaskStatus,
@@ -50,6 +51,7 @@ class UserAccountSerializer(serializers.ModelSerializer):
 
 class ProjectSerializer(serializers.ModelSerializer):
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)
+    status = serializers.CharField(required=False, allow_blank=True)
 
     class Meta:
         model = Project
@@ -87,8 +89,33 @@ class TaskPrioritySerializer(serializers.ModelSerializer):
 
 
 class TaskSerializer(serializers.ModelSerializer):
+    assigned_users = serializers.SerializerMethodField()
+
     class Meta:
         model = Task
+        fields = "__all__"
+
+    def get_assigned_users(self, obj):
+        """Return list of assigned users with their details"""
+        assignments = obj.assignments.all()
+        return [
+            {
+                "id_user": assignment.assigned_to.id_user,
+                "email": assignment.assigned_to.email,
+                "username": assignment.assigned_to.username,
+                "id_assignment": assignment.id_assignment,
+            }
+            for assignment in assignments
+        ]
+
+
+class TaskAssignmentSerializer(serializers.ModelSerializer):
+    assigned_to_email = serializers.CharField(source="assigned_to.email", read_only=True)
+    assigned_to_username = serializers.CharField(source="assigned_to.username", read_only=True)
+    task_title = serializers.CharField(source="task.title", read_only=True)
+
+    class Meta:
+        model = TaskAssignment
         fields = "__all__"
 
 

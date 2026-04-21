@@ -25,6 +25,7 @@ from apps.core.views import (
     RefreshView,
     RoleViewSet,
     SystemRoleViewSet,
+    TaskAssignmentViewSet,
     TaskCommentViewSet,
     TaskPriorityViewSet,
     TaskStatusViewSet,
@@ -43,6 +44,7 @@ router.register(r"boards", BoardViewSet)
 router.register(r"task-statuses", TaskStatusViewSet)
 router.register(r"task-priorities", TaskPriorityViewSet)
 router.register(r"tasks", TaskViewSet)
+router.register(r"task-assignments", TaskAssignmentViewSet)
 router.register(r"task-comments", TaskCommentViewSet)
 router.register(r"activity-logs", ActivityLogViewSet)
 
