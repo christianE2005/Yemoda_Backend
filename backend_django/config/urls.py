@@ -17,7 +17,9 @@ from apps.core.views import (
     GithubPushListView,
     GithubPushWebhookView,
     GithubRepoContentsView,
+    HealthCheckView,
     LoginView,
+    ProjectMembersView,
     ProjectMemberViewSet,
     ProjectViewSet,
     RefreshView,
@@ -46,6 +48,7 @@ router.register(r"activity-logs", ActivityLogViewSet)
 
 urlpatterns = [
     path("admin/", admin.site.urls),
+    path("api/health/", HealthCheckView.as_view(), name="health"),
     path("api/schema/", SpectacularAPIView.as_view(), name="schema"),
     path("api/docs/", SpectacularSwaggerView.as_view(url_name="schema"), name="swagger-ui"),
     path("api/auth/login/", LoginView.as_view(), name="auth-login"),
@@ -62,5 +65,6 @@ urlpatterns = [
     path("api/github/commits/diff/", GithubCommitDiffView.as_view(), name="github-commit-diff"),
     path("api/github/contents/", GithubRepoContentsView.as_view(), name="github-repo-contents"),
     path("api/task-warnings/", TaskWarningListView.as_view(), name="task-warning-list"),
+    path("api/projects/<int:project_id>/members/", ProjectMembersView.as_view(), name="project-members"),
     path("api/", include(router.urls)),
 ]

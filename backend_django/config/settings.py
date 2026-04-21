@@ -1,13 +1,13 @@
 from pathlib import Path
 import os
-from dotenv import dotenv_values
+from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-env = dotenv_values(BASE_DIR / ".env")
+load_dotenv(BASE_DIR / ".env")
 
-SECRET_KEY = env.get("DJANGO_SECRET_KEY", "change-me")
-DEBUG = env.get("DJANGO_DEBUG", "true").lower() == "true"
-ALLOWED_HOSTS = [host.strip() for host in env.get("DJANGO_ALLOWED_HOSTS", "*").split(",") if host.strip()]
+SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "change-me")
+DEBUG = os.getenv("DJANGO_DEBUG", "true").lower() == "true"
+ALLOWED_HOSTS = [host.strip() for host in os.getenv("DJANGO_ALLOWED_HOSTS", "*").split(",") if host.strip()]
 
 INSTALLED_APPS = [
     'corsheaders',
@@ -34,7 +34,7 @@ MIDDLEWARE = [
 ]
 
 CORS_ALLOWED_ORIGINS = [
-    origin.strip() for origin in env.get("CORS_ALLOWED_ORIGINS", "http://localhost:5173").split(",") if origin.strip()
+    origin.strip() for origin in os.getenv("CORS_ALLOWED_ORIGINS", "http://localhost:5173").split(",") if origin.strip()
 ]
 
 ROOT_URLCONF = "config.urls"
@@ -60,11 +60,11 @@ ASGI_APPLICATION = "config.asgi.application"
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.postgresql",
-        "NAME": env.get("DB_NAME", "app_db"),
-        "USER": env.get("DB_USER", "postgres"),
-        "PASSWORD": env.get("DB_PASSWORD", "postgres"),
-        "HOST": env.get("DB_HOST", "localhost"),
-        "PORT": env.get("DB_PORT", "5432"),
+        "NAME": os.getenv("DB_NAME", "app_db"),
+        "USER": os.getenv("DB_USER", "postgres"),
+        "PASSWORD": os.getenv("DB_PASSWORD", "postgres"),
+        "HOST": os.getenv("DB_HOST", "localhost"),
+        "PORT": os.getenv("DB_PORT", "5432"),
     }
 }
 
@@ -110,10 +110,10 @@ SPECTACULAR_SETTINGS = {
     },
 }
 
-JWT_SECRET_KEY = env.get("JWT_SECRET_KEY", SECRET_KEY)
-JWT_ALGORITHM = env.get("JWT_ALGORITHM", "HS256")
-JWT_EXPIRE_MINUTES = int(env.get("JWT_EXPIRE_MINUTES", "60"))
-JWT_REFRESH_EXPIRE_MINUTES = int(env.get("JWT_REFRESH_EXPIRE_MINUTES", "10080"))
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", SECRET_KEY)
+JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
+JWT_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", "60"))
+JWT_REFRESH_EXPIRE_MINUTES = int(os.getenv("JWT_REFRESH_EXPIRE_MINUTES", "10080"))
 
 GITHUB_APP_ID = os.getenv("GITHUB_APP_ID", "")
 GITHUB_APP_SLUG = os.getenv("GITHUB_APP_SLUG", "")
@@ -130,7 +130,4 @@ GITHUB_APP_PRIVATE_KEY = _raw_private_key
 GITHUB_APP_WEBHOOK_SECRET = os.getenv("GITHUB_APP_WEBHOOK_SECRET", "")
 GITHUB_APP_WEBHOOK_TARGET_URL = os.getenv("GITHUB_APP_WEBHOOK_TARGET_URL", "")
 GITHUB_APP_STATE_SECRET = os.getenv("GITHUB_APP_STATE_SECRET", JWT_SECRET_KEY)
-
-cors_origins_raw = os.getenv("CORS_ALLOWED_ORIGINS", "")
-CORS_ALLOWED_ORIGINS = [origin.strip() for origin in cors_origins_raw.split(",") if origin.strip()]
 CORS_ALLOW_ALL_ORIGINS = os.getenv("CORS_ALLOW_ALL_ORIGINS", "false").lower() == "true"

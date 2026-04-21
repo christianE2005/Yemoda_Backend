@@ -331,16 +331,13 @@ class ProjectMemberViewSet(viewsets.ModelViewSet):
     serializer_class = ProjectMemberSerializer
 
     def perform_create(self, serializer):
-        """Prevent adding a user who is already the project creator."""
         project = serializer.validated_data.get('project')
         user = serializer.validated_data.get('user')
         if project and user and project.created_by_id == user.pk:
-            from rest_framework.exceptions import ValidationError
             raise ValidationError("El creador del proyecto ya es miembro por defecto.")
         serializer.save()
 
     def get_queryset(self):
-        """Filter members to the requested project (if ?project= provided), scoped to projects the user belongs to."""
         user = self.request.user
         user_projects = Project.objects.filter(
             Q(members__user=user) | Q(created_by=user)
@@ -353,6 +350,61 @@ class ProjectMemberViewSet(viewsets.ModelViewSet):
             qs = qs.filter(project_id=project_id)
 
         return qs.distinct()
+
+
+class ProjectMembersView(APIView):
+    @extend_schema(
+        request={"application/json": {"type": "object", "properties": {
+            "user_id": {"type": "integer"},
+            "role_id": {"type": "integer", "nullable": True},
+        }, "required": ["user_id"]}},
+        responses={201: ProjectMemberSerializer, 400: dict, 404: dict},
+        tags=["projects"],
+    )
+    def post(self, request, project_id):
+        """Añade un usuario a un proyecto."""
+        project = Project.objects.filter(pk=project_id).first()
+        if not project:
+            return Response({"detail": "Proyecto no encontrado."}, status=status.HTTP_404_NOT_FOUND)
+
+        if project.created_by != request.user:
+            user_projects = Project.objects.filter(members__user=request.user).values_list('id_project', flat=True)
+            if project_id not in user_projects:
+                return Response({"detail": "No tienes acceso a este proyecto."}, status=status.HTTP_403_FORBIDDEN)
+
+        user_id = request.data.get("user_id")
+        if not user_id:
+            return Response({"detail": "user_id es requerido."}, status=status.HTTP_400_BAD_REQUEST)
+
+        user = UserAccount.objects.filter(pk=user_id).first()
+        if not user:
+            return Response({"detail": "Usuario no encontrado."}, status=status.HTTP_404_NOT_FOUND)
+
+        if ProjectMember.objects.filter(project=project, user=user).exists():
+            return Response({"detail": "El usuario ya es miembro del proyecto."}, status=status.HTTP_400_BAD_REQUEST)
+
+        role_id = request.data.get("role_id")
+        role = None
+        if role_id:
+            role = Role.objects.filter(pk=role_id).first()
+            if not role:
+                return Response({"detail": "Rol no encontrado."}, status=status.HTTP_404_NOT_FOUND)
+
+        member = ProjectMember.objects.create(project=project, user=user, role=role)
+        return Response(ProjectMemberSerializer(member).data, status=status.HTTP_201_CREATED)
+
+    @extend_schema(
+        responses={200: ProjectMemberSerializer(many=True)},
+        tags=["projects"],
+    )
+    def get(self, request, project_id):
+        """Lista los miembros de un proyecto."""
+        project = Project.objects.filter(pk=project_id).first()
+        if not project:
+            return Response({"detail": "Proyecto no encontrado."}, status=status.HTTP_404_NOT_FOUND)
+
+        members = ProjectMember.objects.filter(project=project)
+        return Response(ProjectMemberSerializer(members, many=True).data, status=status.HTTP_200_OK)
 
 
 class BoardViewSet(viewsets.ModelViewSet):
@@ -1209,6 +1261,14 @@ class TaskWarningListView(APIView):
 
         serializer = TaskWarningSerializer(qs[:100], many=True)
         return Response(serializer.data)
+
+
+class HealthCheckView(APIView):
+    authentication_classes = []
+    permission_classes = []
+
+    def get(self, request):
+        return Response({"status": "ok"}, status=status.HTTP_200_OK)
 
 
 class GithubAppDebugView(APIView):
