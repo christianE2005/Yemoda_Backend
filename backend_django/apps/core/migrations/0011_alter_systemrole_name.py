@@ -13,6 +13,6 @@ class Migration(migrations.Migration):
         migrations.AlterField(
             model_name='systemrole',
             name='name',
-            field=models.CharField(choices=[('Admin', 'Admin'), ('User', 'User'), ('Stakeholder', 'Stakeholder')], max_length=50, unique=True),
+            field=models.CharField(choices=[('Admin', 'Admin'), ('User', 'User'), ('Stakeholder', 'Stakeholder'), ('Project Manager', 'Project Manager')], max_length=50, unique=True),
         ),
     ]

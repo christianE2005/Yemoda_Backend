@@ -10,6 +10,7 @@ from .models import (
     Role,
     SystemRole,
     Task,
+    TaskAssignment,
     TaskComment,
     TaskPriority,
     TaskStatus,
@@ -25,6 +26,7 @@ admin.site.register(Board)
 admin.site.register(TaskStatus)
 admin.site.register(TaskPriority)
 admin.site.register(Task)
+admin.site.register(TaskAssignment)
 admin.site.register(TaskComment)
 admin.site.register(ActivityLog)
 admin.site.register(GithubConnection)

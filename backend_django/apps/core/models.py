@@ -5,11 +5,13 @@ class SystemRole(models.Model):
     ADMIN = "Admin"
     USER = "User"
     STAKEHOLDER = "Stakeholder"
+    PROJECT_MANAGER = "Project Manager"
 
     ROLE_CHOICES = [
         (ADMIN, "Admin"),
         (USER, "User"),
         (STAKEHOLDER, "Stakeholder"),
+        (PROJECT_MANAGER, "Project Manager"),
     ]
 
     id_system_role = models.BigAutoField(primary_key=True)
@@ -55,12 +57,28 @@ class UserAccount(models.Model):
 
 
 class Project(models.Model):
+    PLANNING = "Planeación"
+    IN_PROGRESS = "En Progreso"
+    IN_REVIEW = "Revisión"
+    FINISHED = "Finalizado"
+    RETIRED = "Retirado"
+    CANCELLED = "Cancelado"
+
+    STATUS_CHOICES = [
+        (PLANNING, "Planeación"),
+        (IN_PROGRESS, "En Progreso"),
+        (IN_REVIEW, "Revisión"),
+        (FINISHED, "Finalizado"),
+        (RETIRED, "Retirado"),
+        (CANCELLED, "Cancelado"),
+    ]
+
     id_project = models.BigAutoField(primary_key=True)
     name = models.CharField(max_length=150)
     description = models.TextField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     end_date = models.DateField(null=True, blank=True)
-    status = models.CharField(max_length=50, null=True, blank=True)
+    status = models.CharField(max_length=50, choices=STATUS_CHOICES, default=IN_PROGRESS)
     created_by = models.ForeignKey(
         UserAccount,
         on_delete=models.SET_NULL,
@@ -181,20 +199,33 @@ class Task(models.Model):
         db_column="created_by",
         related_name="tasks_created",
     )
-    assigned_to = models.ForeignKey(
-        UserAccount,
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        db_column="assigned_to",
-        related_name="tasks_assigned",
-    )
     created_at = models.DateTimeField(auto_now_add=True)
     due_date = models.DateField(null=True, blank=True)
     completed_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         db_table = "task"
+
+
+class TaskAssignment(models.Model):
+    id_assignment = models.BigAutoField(primary_key=True)
+    task = models.ForeignKey(
+        Task,
+        on_delete=models.CASCADE,
+        db_column="id_task",
+        related_name="assignments",
+    )
+    assigned_to = models.ForeignKey(
+        UserAccount,
+        on_delete=models.CASCADE,
+        db_column="id_user",
+        related_name="task_assignments",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "task_assignment"
+        unique_together = ("task", "assigned_to")
 
 
 class TaskComment(models.Model):

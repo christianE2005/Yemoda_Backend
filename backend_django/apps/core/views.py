@@ -15,7 +15,7 @@ from django.db.models import Q
 from drf_spectacular.utils import extend_schema
 from rest_framework import status, viewsets
 from rest_framework.exceptions import ValidationError
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from .authentication import IsAdminUser
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -32,6 +32,7 @@ from .models import (
     Role,
     SystemRole,
     Task,
+    TaskAssignment,
     TaskComment,
     TaskPriority,
     TaskPushMatch,
@@ -54,6 +55,7 @@ from .serializers import (
     RegisterSerializer,
     RoleSerializer,
     SystemRoleSerializer,
+    TaskAssignmentSerializer,
     TaskCommentSerializer,
     TaskPrioritySerializer,
     TaskPushMatchSerializer,
@@ -274,7 +276,11 @@ def _user_from_bearer_token(request) -> UserAccount | None:
 class UserAccountViewSet(viewsets.ModelViewSet):
     queryset = UserAccount.objects.all()
     serializer_class = UserAccountSerializer
-    permission_classes = [IsAdminUser]
+
+    def get_permissions(self):
+        if self.action in ("list", "retrieve"):
+            return [IsAuthenticated()]
+        return [IsAdminUser()]
 
     def perform_create(self, serializer):
         """Admin creates users with hashed passwords"""
@@ -302,7 +308,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
             )
 
     def perform_create(self, serializer):
-        project = serializer.save(created_by=self.request.user)
+        project = serializer.save(created_by=self.request.user, status=Project.PLANNING)
         try:
             ProjectMember.objects.get_or_create(
                 project=project,
@@ -437,12 +443,22 @@ class TaskViewSet(viewsets.ModelViewSet):
     serializer_class = TaskSerializer
 
     def get_queryset(self):
-        """Filter tasks by ?board= query param when provided."""
-        qs = Task.objects.all()
+        """Tasks of projects the user belongs to. Optional filters: ?board= ?project="""
+        user = self.request.user
+        user_project_ids = Project.objects.filter(
+            Q(members__user=user) | Q(created_by=user)
+        ).values_list('id_project', flat=True)
+        qs = Task.objects.filter(board__project_id__in=user_project_ids)
+
         board_id = self.request.query_params.get('board')
         if board_id is not None:
             qs = qs.filter(board_id=board_id)
-        return qs
+
+        project_id = self.request.query_params.get('project')
+        if project_id is not None:
+            qs = qs.filter(board__project_id=project_id)
+
+        return qs.distinct()
 
 
 class TaskCommentViewSet(viewsets.ModelViewSet):
@@ -455,6 +471,24 @@ class TaskCommentViewSet(viewsets.ModelViewSet):
         task_id = self.request.query_params.get('task')
         if task_id is not None:
             qs = qs.filter(task_id=task_id)
+        return qs
+
+
+class TaskAssignmentViewSet(viewsets.ModelViewSet):
+    queryset = TaskAssignment.objects.all()
+    serializer_class = TaskAssignmentSerializer
+
+    def get_queryset(self):
+        """Filter assignments by ?task= or ?user= query params."""
+        qs = TaskAssignment.objects.all()
+        task_id = self.request.query_params.get('task')
+        user_id = self.request.query_params.get('user')
+        
+        if task_id is not None:
+            qs = qs.filter(task_id=task_id)
+        if user_id is not None:
+            qs = qs.filter(assigned_to_id=user_id)
+        
         return qs
 
 
