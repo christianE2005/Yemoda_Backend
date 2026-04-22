@@ -236,6 +236,50 @@ def _resolve_org_installation_for_user(user: UserAccount, org_login: str) -> int
     raise ValueError("La GitHub App no esta instalada en esa organizacion.")
 
 
+def _add_github_collaborator(repo_full_name: str, github_login: str, permission: str = "push") -> None:
+    """Add a GitHub user as collaborator to a repo using the App installation token."""
+    import logging
+    logger = logging.getLogger(__name__)
+
+    # Find the installation for this repo's owner (org or user)
+    owner = repo_full_name.split("/")[0]
+    try:
+        installation = GithubAppInstallation.objects.filter(account_login__iexact=owner).first()
+        if installation:
+            token = _installation_access_token(installation.installation_id)
+        else:
+            # Fallback: use app-level auth to find the installation
+            installations_resp = requests.get(
+                f"{GITHUB_API_URL}/app/installations",
+                headers=_github_app_headers(),
+                timeout=20,
+            )
+            installations_resp.raise_for_status()
+            install_id = next(
+                (i["id"] for i in installations_resp.json()
+                 if (i.get("account") or {}).get("login", "").lower() == owner.lower()),
+                None,
+            )
+            if not install_id:
+                logger.warning("No App installation found for owner %s, skipping collaborator add.", owner)
+                return
+            token = _installation_access_token(install_id)
+    except Exception as exc:
+        logger.warning("Could not get token to add collaborator: %s", exc)
+        return
+
+    resp = requests.put(
+        f"{GITHUB_API_URL}/repos/{repo_full_name}/collaborators/{github_login}",
+        headers=_github_headers(token),
+        json={"permission": permission},
+        timeout=20,
+    )
+    if resp.status_code >= 400:
+        logger.warning("Could not add %s as collaborator to %s: %s", github_login, repo_full_name, resp.text)
+    else:
+        logger.info("Added %s as collaborator (%s) to %s.", github_login, permission, repo_full_name)
+
+
 def _build_signed_oauth_state() -> str:
     expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
     payload = {
@@ -399,6 +443,13 @@ class ProjectMembersView(APIView):
                 return Response({"detail": "Rol no encontrado."}, status=status.HTTP_404_NOT_FOUND)
 
         member = ProjectMember.objects.create(project=project, user=user, role=role)
+
+        # If the project has a linked repo, add the new member as a collaborator on GitHub
+        if project.github_repo_full_name:
+            github_conn = GithubConnection.objects.filter(user=user).first()
+            if github_conn and github_conn.github_login:
+                _add_github_collaborator(project.github_repo_full_name, github_conn.github_login)
+
         return Response(ProjectMemberSerializer(member).data, status=status.HTTP_201_CREATED)
 
     @extend_schema(
@@ -986,6 +1037,26 @@ class GithubCreateRepoView(APIView):
                 "html_url": repo.get("html_url", ""),
             },
         )
+
+        # For org repos (created via App token), add the user as collaborator
+        # so they can push. The repo was created by the bot, not the user.
+        if owner_type == "org":
+            github_connection = GithubConnection.objects.filter(user=user).first()
+            if github_connection and github_connection.github_login:
+                collab_response = requests.put(
+                    f"{GITHUB_API_URL}/repos/{repo['full_name']}/collaborators/{github_connection.github_login}",
+                    headers=auth_headers,
+                    json={"permission": "admin"},
+                    timeout=20,
+                )
+                if collab_response.status_code >= 400:
+                    import logging
+                    logging.getLogger(__name__).warning(
+                        "Could not add %s as collaborator to %s: %s",
+                        github_connection.github_login,
+                        repo["full_name"],
+                        collab_response.text,
+                    )
 
         webhook_url = data.get("webhook_url") or settings.GITHUB_APP_WEBHOOK_TARGET_URL
         if not webhook_url:
