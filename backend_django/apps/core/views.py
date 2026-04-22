@@ -770,11 +770,7 @@ class GithubAppOauthCallbackView(APIView):
             return None, "Authorization Bearer requerido para vincular GitHub al usuario actual.", status.HTTP_401_UNAUTHORIZED
 
         user = token_user
-        if user:
-            if user.username != github_login:
-                user.username = github_login
-                user.save(update_fields=["username"])
-        else:
+        if not user:
             emails_response = requests.get(f"{GITHUB_API_URL}/user/emails", headers=_github_headers(access_token), timeout=20)
             email = None
             if emails_response.status_code < 400:
@@ -794,9 +790,6 @@ class GithubAppOauthCallbackView(APIView):
                     username=github_login,
                     password_hash=make_password(None),
                 )
-            elif user.username != github_login:
-                user.username = github_login
-                user.save(update_fields=["username"])
 
         existing_connection = GithubConnection.objects.filter(github_user_id=github_user_id).first()
         if existing_connection and existing_connection.user_id != user.id_user:
