@@ -112,16 +112,6 @@ class Task(Base):
         ForeignKey("task_priority.id_priority", ondelete="SET NULL"),
         nullable=True,
     )
-    created_by: Mapped[int | None] = mapped_column(
-        Integer,
-        ForeignKey("user_account.id_user", ondelete="SET NULL"),
-        nullable=True,
-    )
-    assigned_to: Mapped[int | None] = mapped_column(
-        Integer,
-        ForeignKey("user_account.id_user", ondelete="SET NULL"),
-        nullable=True,
-    )
     created_at: Mapped[DateTime] = mapped_column(DateTime, server_default=func.now())
     due_date: Mapped[Date | None] = mapped_column(Date, nullable=True)
     completed_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
