@@ -18,6 +18,7 @@ app.include_router(webhook.router)
 
 @app.on_event("startup")
 def on_startup() -> None:
+    routes = [f"{r.methods} {r.path}" for r in app.routes if hasattr(r, "methods")]
     try:
         Base.metadata.create_all(bind=engine)
     except Exception as exc:
