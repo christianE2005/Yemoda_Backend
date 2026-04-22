@@ -691,6 +691,7 @@ class GithubAppOauthStartView(APIView):
             "client_id": settings.GITHUB_APP_CLIENT_ID,
             "redirect_uri": settings.GITHUB_APP_OAUTH_CALLBACK_URL,
             "state": state,
+            "scope": "read:org",
         }
         authorize_url = f"https://github.com/login/oauth/authorize?{urlencode(params)}"
         return Response({"authorize_url": authorize_url, "state": state}, status=status.HTTP_200_OK)
@@ -747,7 +748,9 @@ class GithubAppOauthCallbackView(APIView):
         if orgs_response.status_code >= 400:
             return None, "No se pudieron obtener las organizaciones del usuario.", status.HTTP_400_BAD_REQUEST
 
-        user_org_logins = {org["login"].lower() for org in orgs_response.json()}
+        user_orgs = orgs_response.json()
+        user_org_logins = {org["login"].lower() for org in user_orgs}
+        user_org_by_login = {org["login"].lower(): org["login"] for org in user_orgs}
 
         if not user_org_logins:
             return (
@@ -757,14 +760,40 @@ class GithubAppOauthCallbackView(APIView):
                 status.HTTP_403_FORBIDDEN,
             )
 
-        installed_orgs = set(
+        # 1. Check local DB first (fast path)
+        installed_orgs_db = set(
             GithubAppInstallation.objects.filter(
                 account_login__iregex=r"^(" + "|".join(user_org_logins) + r")$",
                 account_type="Organization",
             ).values_list("account_login", flat=True)
         )
-        installed_orgs_lower = {o.lower() for o in installed_orgs}
-        matching_orgs = user_org_logins & installed_orgs_lower
+        matching_orgs = user_org_logins & {o.lower() for o in installed_orgs_db}
+
+        # 2. Fallback: verify via GitHub API for orgs not yet in DB
+        if not matching_orgs:
+            try:
+                app_headers = _github_app_headers()
+                for org_lower, org_login in user_org_by_login.items():
+                    inst_resp = requests.get(
+                        f"{GITHUB_API_URL}/orgs/{org_login}/installation",
+                        headers=app_headers,
+                        timeout=20,
+                    )
+                    if inst_resp.status_code == 200:
+                        inst_data = inst_resp.json()
+                        inst_id = inst_data.get("id")
+                        account = (inst_data.get("account") or {})
+                        if inst_id:
+                            GithubAppInstallation.objects.update_or_create(
+                                installation_id=inst_id,
+                                defaults={
+                                    "account_login": account.get("login", org_login),
+                                    "account_type": account.get("type", "Organization"),
+                                },
+                            )
+                            matching_orgs.add(org_lower)
+            except Exception:
+                pass
 
         if not matching_orgs:
             return (
