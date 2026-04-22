@@ -859,12 +859,21 @@ class GithubAppLinkInstallationView(APIView):
 class GithubCreateRepoView(APIView):
     @extend_schema(responses={200: GithubRepoSerializer(many=True)}, tags=["github-app"])
     def get(self, request):
-        """Lista los repositorios creados por el usuario autenticado."""
+        """
+        Lista los repositorios vinculados a proyectos del usuario.
+        Filtro: ?project_id=1 para un proyecto específico.
+        """
         user = request.user
-        qs = GithubRepo.objects.filter(user=user)
+        user_project_ids = Project.objects.filter(
+            Q(members__user=user) | Q(created_by=user)
+        ).values_list("id_project", flat=True).distinct()
+
+        qs = GithubRepo.objects.filter(project_id__in=user_project_ids)
+
         project_id = request.query_params.get("project_id")
         if project_id:
             qs = qs.filter(project_id=project_id)
+
         return Response(GithubRepoSerializer(qs, many=True).data)
 
     @extend_schema(request=GithubCreateRepoSerializer, responses={201: dict, 400: dict, 404: dict}, tags=["github-app"])
