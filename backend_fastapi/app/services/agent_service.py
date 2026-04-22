@@ -1,7 +1,7 @@
 import json
 from typing import Any
 
-from app.core.gemini import get_gemini_model
+from app.core.gemini import generate_content
 
 _PROMPT_TEMPLATE = """\
 You are an expert code reviewer and project manager assistant.
@@ -84,10 +84,7 @@ def analyze_push(
         diff=diff[:_MAX_DIFF_CHARS],
     )
 
-    model = get_gemini_model()
-    response = model.generate_content(prompt)
-
-    text = response.text.strip()
+    text = generate_content(prompt).strip()
     if text.startswith("```"):
         parts = text.split("```")
         text = parts[1] if len(parts) > 1 else text
