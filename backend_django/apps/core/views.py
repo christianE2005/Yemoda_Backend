@@ -860,20 +860,27 @@ class GithubCreateRepoView(APIView):
     @extend_schema(responses={200: GithubRepoSerializer(many=True)}, tags=["github-app"])
     def get(self, request):
         """
-        Lista los repositorios vinculados a proyectos del usuario.
-        Filtro: ?project_id=1 para un proyecto específico.
+        Lista los repositorios del proyecto especificado.
+        Requiere: ?project_id=<id>
         """
-        user = request.user
-        user_project_ids = Project.objects.filter(
-            Q(members__user=user) | Q(created_by=user)
-        ).values_list("id_project", flat=True).distinct()
-
-        qs = GithubRepo.objects.filter(project_id__in=user_project_ids)
-
         project_id = request.query_params.get("project_id")
-        if project_id:
-            qs = qs.filter(project_id=project_id)
+        if not project_id:
+            return Response(
+                {"detail": "project_id es requerido."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
+        user = request.user
+        project = Project.objects.filter(
+            Q(id_project=project_id) & (Q(members__user=user) | Q(created_by=user))
+        ).distinct().first()
+        if not project:
+            return Response(
+                {"detail": "Proyecto no encontrado o no tienes acceso."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        qs = GithubRepo.objects.filter(project_id=project_id)
         return Response(GithubRepoSerializer(qs, many=True).data)
 
     @extend_schema(request=GithubCreateRepoSerializer, responses={201: dict, 400: dict, 404: dict}, tags=["github-app"])
@@ -951,13 +958,20 @@ class GithubCreateRepoView(APIView):
 
         repo = repo_response.json()
 
-        project_id = data.get("project_id")
-        project_obj = None
-        if project_id:
-            Project.objects.filter(id_project=project_id).update(
-                github_repo_full_name=repo.get("full_name")
+        project_id = data["project_id"]
+        project_obj = Project.objects.filter(
+            Q(id_project=project_id) & (Q(members__user=user) | Q(created_by=user))
+        ).distinct().first()
+        if not project_obj:
+            return Response(
+                {"detail": "Proyecto no encontrado o no tienes acceso."},
+                status=status.HTTP_404_NOT_FOUND,
             )
-            project_obj = Project.objects.filter(id_project=project_id).first()
+
+        Project.objects.filter(id_project=project_id).update(
+            github_repo_full_name=repo.get("full_name")
+        )
+        project_obj.refresh_from_db()
 
         # Always persist the repo so it can be listed later
         GithubRepo.objects.update_or_create(
