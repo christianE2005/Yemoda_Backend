@@ -236,19 +236,17 @@ def _resolve_org_installation_for_user(user: UserAccount, org_login: str) -> int
     raise ValueError("La GitHub App no esta instalada en esa organizacion.")
 
 
-def _add_github_collaborator(repo_full_name: str, github_login: str, permission: str = "push") -> None:
+def _add_github_collaborator(repo_full_name: str, github_login: str, permission: str = "push") -> str:
     """Add a GitHub user as collaborator to a repo using the App installation token."""
     import logging
     logger = logging.getLogger(__name__)
 
-    # Find the installation for this repo's owner (org or user)
     owner = repo_full_name.split("/")[0]
     try:
         installation = GithubAppInstallation.objects.filter(account_login__iexact=owner).first()
         if installation:
             token = _installation_access_token(installation.installation_id)
         else:
-            # Fallback: use app-level auth to find the installation
             installations_resp = requests.get(
                 f"{GITHUB_API_URL}/app/installations",
                 headers=_github_app_headers(),
@@ -261,12 +259,14 @@ def _add_github_collaborator(repo_full_name: str, github_login: str, permission:
                 None,
             )
             if not install_id:
-                logger.warning("No App installation found for owner %s, skipping collaborator add.", owner)
-                return
+                msg = f"no App installation found for owner '{owner}'"
+                logger.warning(msg)
+                return msg
             token = _installation_access_token(install_id)
     except Exception as exc:
+        msg = f"token error: {exc}"
         logger.warning("Could not get token to add collaborator: %s", exc)
-        return
+        return msg
 
     resp = requests.put(
         f"{GITHUB_API_URL}/repos/{repo_full_name}/collaborators/{github_login}",
@@ -275,9 +275,12 @@ def _add_github_collaborator(repo_full_name: str, github_login: str, permission:
         timeout=20,
     )
     if resp.status_code >= 400:
+        msg = f"github error {resp.status_code}: {resp.text}"
         logger.warning("Could not add %s as collaborator to %s: %s", github_login, repo_full_name, resp.text)
-    else:
-        logger.info("Added %s as collaborator (%s) to %s.", github_login, permission, repo_full_name)
+        return msg
+
+    logger.info("Added %s as collaborator (%s) to %s.", github_login, permission, repo_full_name)
+    return "ok"
 
 
 def _build_signed_oauth_state() -> str:
@@ -445,12 +448,21 @@ class ProjectMembersView(APIView):
         member = ProjectMember.objects.create(project=project, user=user, role=role)
 
         # If the project has a linked repo, add the new member as a collaborator on GitHub
+        github_collab_result = None
         if project.github_repo_full_name:
             github_conn = GithubConnection.objects.filter(user=user).first()
             if github_conn and github_conn.github_login:
-                _add_github_collaborator(project.github_repo_full_name, github_conn.github_login)
+                github_collab_result = _add_github_collaborator(
+                    project.github_repo_full_name, github_conn.github_login
+                )
+            else:
+                github_collab_result = "skipped: user has no GitHub connection"
+        else:
+            github_collab_result = "skipped: project has no linked repo"
 
-        return Response(ProjectMemberSerializer(member).data, status=status.HTTP_201_CREATED)
+        response_data = ProjectMemberSerializer(member).data
+        response_data["github_collaborator"] = github_collab_result
+        return Response(response_data, status=status.HTTP_201_CREATED)
 
     @extend_schema(
         responses={200: ProjectMemberSerializer(many=True)},
