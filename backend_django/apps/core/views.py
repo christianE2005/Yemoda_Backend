@@ -236,41 +236,14 @@ def _resolve_org_installation_for_user(user: UserAccount, org_login: str) -> int
     raise ValueError("La GitHub App no esta instalada en esa organizacion.")
 
 
-def _add_github_collaborator(repo_full_name: str, github_login: str, permission: str = "push") -> str:
-    """Add a GitHub user as collaborator to a repo using the App installation token."""
+def _add_github_collaborator(repo_full_name: str, github_login: str, admin_token: str, permission: str = "push") -> str:
+    """Add a GitHub user as collaborator using the repo admin's OAuth token."""
     import logging
     logger = logging.getLogger(__name__)
 
-    owner = repo_full_name.split("/")[0]
-    try:
-        installation = GithubAppInstallation.objects.filter(account_login__iexact=owner).first()
-        if installation:
-            token = _installation_access_token(installation.installation_id)
-        else:
-            installations_resp = requests.get(
-                f"{GITHUB_API_URL}/app/installations",
-                headers=_github_app_headers(),
-                timeout=20,
-            )
-            installations_resp.raise_for_status()
-            install_id = next(
-                (i["id"] for i in installations_resp.json()
-                 if (i.get("account") or {}).get("login", "").lower() == owner.lower()),
-                None,
-            )
-            if not install_id:
-                msg = f"no App installation found for owner '{owner}'"
-                logger.warning(msg)
-                return msg
-            token = _installation_access_token(install_id)
-    except Exception as exc:
-        msg = f"token error: {exc}"
-        logger.warning("Could not get token to add collaborator: %s", exc)
-        return msg
-
     resp = requests.put(
         f"{GITHUB_API_URL}/repos/{repo_full_name}/collaborators/{github_login}",
-        headers=_github_headers(token),
+        headers=_github_headers(admin_token),
         json={"permission": permission},
         timeout=20,
     )
@@ -393,10 +366,18 @@ class ProjectMemberViewSet(viewsets.ModelViewSet):
         member = serializer.save()
 
         # Add as GitHub collaborator if project has a linked repo
+        # Use the project creator's OAuth token (they have admin on the repo)
         if project and project.github_repo_full_name and user:
-            github_conn = GithubConnection.objects.filter(user=user).first()
-            if github_conn and github_conn.github_login:
-                _add_github_collaborator(project.github_repo_full_name, github_conn.github_login)
+            new_user_conn = GithubConnection.objects.filter(user=user).first()
+            creator_conn = GithubConnection.objects.filter(user_id=project.created_by_id).first()
+            if new_user_conn and new_user_conn.github_login and creator_conn:
+                admin_token = _get_valid_github_token(creator_conn)
+                if admin_token:
+                    _add_github_collaborator(
+                        project.github_repo_full_name,
+                        new_user_conn.github_login,
+                        admin_token,
+                    )
 
     def get_queryset(self):
         user = self.request.user
@@ -454,15 +435,25 @@ class ProjectMembersView(APIView):
         member = ProjectMember.objects.create(project=project, user=user, role=role)
 
         # If the project has a linked repo, add the new member as a collaborator on GitHub
+        # Use the project creator's OAuth token (they have admin on the repo)
         github_collab_result = None
         if project.github_repo_full_name:
-            github_conn = GithubConnection.objects.filter(user=user).first()
-            if github_conn and github_conn.github_login:
-                github_collab_result = _add_github_collaborator(
-                    project.github_repo_full_name, github_conn.github_login
-                )
-            else:
+            new_user_conn = GithubConnection.objects.filter(user=user).first()
+            creator_conn = GithubConnection.objects.filter(user_id=project.created_by_id).first()
+            if not new_user_conn or not new_user_conn.github_login:
                 github_collab_result = "skipped: user has no GitHub connection"
+            elif not creator_conn:
+                github_collab_result = "skipped: project creator has no GitHub connection"
+            else:
+                admin_token = _get_valid_github_token(creator_conn)
+                if not admin_token:
+                    github_collab_result = "skipped: project creator's GitHub token expired"
+                else:
+                    github_collab_result = _add_github_collaborator(
+                        project.github_repo_full_name,
+                        new_user_conn.github_login,
+                        admin_token,
+                    )
         else:
             github_collab_result = "skipped: project has no linked repo"
 
@@ -1067,6 +1058,23 @@ class GithubCreateRepoView(APIView):
                         github_connection.github_login,
                         repo["full_name"],
                         collab_response.text,
+                    )
+
+        # Sync existing project members as collaborators (push permission)
+        # Uses the creator's OAuth token since they now have admin on the repo
+        creator_conn = GithubConnection.objects.filter(user=user).first()
+        creator_token = _get_valid_github_token(creator_conn) if creator_conn else None
+        if creator_token:
+            existing_members = ProjectMember.objects.filter(
+                project=project_obj
+            ).exclude(user=user).select_related("user")
+            for member in existing_members:
+                member_conn = GithubConnection.objects.filter(user=member.user).first()
+                if member_conn and member_conn.github_login:
+                    _add_github_collaborator(
+                        repo["full_name"],
+                        member_conn.github_login,
+                        creator_token,
                     )
 
         webhook_url = data.get("webhook_url") or settings.GITHUB_APP_WEBHOOK_TARGET_URL
