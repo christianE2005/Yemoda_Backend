@@ -4,10 +4,10 @@ import json
 import logging
 import os
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request, status
+from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
-from app.core.deps import get_db
+from app.core.database import SessionLocal
 from app.services.agent_service import analyze_push
 from app.services.github_service import fetch_push_diff
 from app.services.task_service import (
@@ -39,7 +39,7 @@ def _verify_signature(payload: bytes, signature: str) -> bool:
     return hmac.compare_digest(signature, expected)
 
 
-async def _process_push(payload: dict, db: Session) -> None:
+async def _run_push_analysis(payload: dict, db: Session) -> None:
     repo_full_name: str = (payload.get("repository") or {}).get("full_name", "")
     before: str = payload.get("before", "")
     after: str = payload.get("after", "")
@@ -71,7 +71,6 @@ async def _process_push(payload: dict, db: Session) -> None:
 
     logger.info("Got diff (%d chars) — sending to Gemini", len(diff))
 
-    # Create a push event record so we can link matches to it
     push_event = create_or_get_push_event(
         db,
         project_id=project.id_project,
@@ -86,7 +85,6 @@ async def _process_push(payload: dict, db: Session) -> None:
         for t in tasks
     ]
 
-    # Gather active warnings per task to pass to Gemini
     active_warnings_map: dict[int, list[dict]] = {}
     for t in tasks:
         warnings = get_active_warnings(db, t.id_task)
@@ -113,7 +111,6 @@ async def _process_push(payload: dict, db: Session) -> None:
         if review_status_id:
             move_task_to_review(db, task, review_status_id)
 
-        # Resolve warnings that Gemini says are fixed
         resolved_ids = match.get("resolved_warning_ids") or []
         task_warns = get_active_warnings(db, story_id)
         for w in task_warns:
@@ -121,13 +118,11 @@ async def _process_push(payload: dict, db: Session) -> None:
                 resolve_warning(db, w)
                 logger.info("Warning %s resolved for story %s.", w.id_warning, story_id)
 
-        # Create new warnings linked to this push
         new_warnings = match.get("new_warnings") or []
         for msg in new_warnings:
             create_warning(db, story_id, msg, push_id=push_event.id_push)
             logger.info("New warning created for story %s: %s", story_id, msg)
 
-        # Save the push<->task match with code snippet
         coverage = match.get("coverage", "partial")
         code_snippet = match.get("code_snippet")
         create_push_match(
@@ -140,7 +135,6 @@ async def _process_push(payload: dict, db: Session) -> None:
         )
         logger.info("TaskPushMatch saved for story %s (push %s).", story_id, push_event.id_push)
 
-        # Build comment
         coverage_label = "✅ Completa" if coverage == "full" else "⚠️ Parcial"
         lines = [
             "🤖 **Análisis de IA — Push detectado**",
@@ -157,11 +151,18 @@ async def _process_push(payload: dict, db: Session) -> None:
         logger.info("Story %s moved to Review and comment added.", story_id)
 
 
+async def _process_push(payload: dict) -> None:
+    db: Session = SessionLocal()
+    try:
+        await _run_push_analysis(payload, db)
+    finally:
+        db.close()
+
+
 @router.post("/push/")
 async def github_push_webhook(
     request: Request,
     background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db),
     x_hub_signature_256: str = Header(default=""),
     x_github_event: str = Header(default=""),
 ):
@@ -185,10 +186,11 @@ async def github_push_webhook(
     except json.JSONDecodeError:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Payload JSON inválido.")
 
-    background_tasks.add_task(_process_push, payload, db)
+    background_tasks.add_task(_process_push, payload)
 
     return {
         "detail": "Push recibido. Analizando con IA en segundo plano...",
         "repository": (payload.get("repository") or {}).get("full_name"),
         "ref": payload.get("ref"),
     }
+
