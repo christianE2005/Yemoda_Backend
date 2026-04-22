@@ -1,12 +1,17 @@
 from datetime import datetime, timezone
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models.models import Board, GithubPushEvent, Project, Task, TaskComment, TaskPushMatch, TaskStatus, TaskWarning
 
 
 def get_project_by_repo(db: Session, repo_full_name: str) -> Project | None:
-    return db.query(Project).filter(Project.github_repo_full_name == repo_full_name).first()
+    return (
+        db.query(Project)
+        .filter(func.lower(Project.github_repo_full_name) == repo_full_name.lower())
+        .first()
+    )
 
 
 def get_active_tasks(db: Session, project_id: int) -> list[Task]:

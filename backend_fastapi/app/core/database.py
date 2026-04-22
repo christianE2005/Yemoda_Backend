@@ -6,9 +6,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-DATABASE_URL = os.getenv(
-    "FASTAPI_DATABASE_URL",
-    "postgresql+psycopg2://postgres:postgres@localhost:5432/app_db",
+DATABASE_URL = (
+    os.getenv("FASTAPI_DATABASE_URL")
+    or os.getenv("DATABASE_URL")
+    or "postgresql+psycopg2://postgres:postgres@localhost:5432/app_db"
 )
 
 if DATABASE_URL.startswith("postgres://"):
