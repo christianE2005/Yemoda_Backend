@@ -1480,8 +1480,8 @@ class TaskWarningListView(APIView):
             Q(created_by=user) | Q(members__user=user)
         ).distinct().values_list("id_project", flat=True)
 
-        user_board_ids = Board.objects.filter(id_project__in=user_project_ids).values_list("id_board", flat=True)
-        qs = TaskWarning.objects.select_related("task").filter(task__id_board__in=user_board_ids)
+        user_board_ids = Board.objects.filter(project_id__in=user_project_ids).values_list("id_board", flat=True)
+        qs = TaskWarning.objects.select_related("task").filter(task__board_id__in=user_board_ids)
 
         task_id = request.query_params.get("task_id")
         warn_status = request.query_params.get("status")
@@ -1492,8 +1492,8 @@ class TaskWarningListView(APIView):
         if warn_status:
             qs = qs.filter(status=warn_status)
         if project_id:
-            project_board_ids = Board.objects.filter(id_project=project_id).values_list("id_board", flat=True)
-            qs = qs.filter(task__id_board__in=project_board_ids)
+            project_board_ids = Board.objects.filter(project_id=project_id).values_list("id_board", flat=True)
+            qs = qs.filter(task__board_id__in=project_board_ids)
 
         serializer = TaskWarningSerializer(qs[:100], many=True)
         return Response(serializer.data)
