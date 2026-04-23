@@ -562,6 +562,7 @@ class TaskAssignmentViewSet(viewsets.ModelViewSet):
 
 class ActivityLogViewSet(viewsets.ModelViewSet):
     serializer_class = ActivityLogSerializer
+    queryset = ActivityLog.objects.none()  # needed for router basename resolution
 
     def get_queryset(self):
         user = self.request.user
