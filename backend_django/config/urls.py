@@ -53,6 +53,9 @@ router.register(r"activity-logs", ActivityLogViewSet)
 
 urlpatterns = [
     path("admin/", admin.site.urls),
+    path("health", HealthCheckView.as_view(), name="health-root-no-slash"),
+    path("health/", HealthCheckView.as_view(), name="health-root"),
+    path("api/health", HealthCheckView.as_view(), name="health-api-no-slash"),
     path("api/health/", HealthCheckView.as_view(), name="health"),
     path("api/schema/", SpectacularAPIView.as_view(), name="schema"),
     path("api/docs/", SpectacularSwaggerView.as_view(url_name="schema"), name="swagger-ui"),
