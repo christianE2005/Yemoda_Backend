@@ -28,10 +28,12 @@ def on_startup() -> None:
     routes = [f"{list(r.methods)} {r.path}" for r in app.routes if hasattr(r, "methods")]
     logger.info("FastAPI startup — registered routes: %s", routes)
     try:
-        Base.metadata.create_all(bind=engine)
+        from sqlalchemy import text
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
         logger.info("DB tables verified OK")
     except Exception as exc:
-        logger.warning("Could not create DB tables on startup: %s", exc)
+        logger.warning("Could not connect to DB on startup: %s", exc)
 
 
 @app.get("/health")
