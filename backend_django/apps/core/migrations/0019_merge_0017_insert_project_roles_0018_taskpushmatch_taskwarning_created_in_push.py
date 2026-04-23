@@ -7,7 +7,7 @@ class Migration(migrations.Migration):
 
     dependencies = [
         ("core", "0017_insert_project_roles"),
-        ("core", "0018_taskpushmatch_taskwarning_created_in_push"),
+        ("core", "0011_taskpushmatch_taskwarning_created_in_push"),
     ]
 
     operations = []
