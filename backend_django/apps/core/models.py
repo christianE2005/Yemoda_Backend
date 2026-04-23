@@ -277,6 +277,14 @@ class ActivityLog(models.Model):
         db_column="id_user",
         related_name="activities",
     )
+    project = models.ForeignKey(
+        "Project",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        db_column="id_project",
+        related_name="activity_logs",
+    )
     entity_type = models.CharField(max_length=50, null=True, blank=True)
     entity_id = models.IntegerField(null=True, blank=True)
     action = models.CharField(max_length=100, null=True, blank=True)

@@ -561,8 +561,24 @@ class TaskAssignmentViewSet(viewsets.ModelViewSet):
 
 
 class ActivityLogViewSet(viewsets.ModelViewSet):
-    queryset = ActivityLog.objects.all()
     serializer_class = ActivityLogSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        user_project_ids = Project.objects.filter(
+            Q(created_by=user) | Q(members__user=user)
+        ).filter(repos__isnull=False).distinct().values_list("id_project", flat=True)
+
+        qs = ActivityLog.objects.filter(project_id__in=user_project_ids).order_by("-created_at")
+
+        project_id = self.request.query_params.get("project_id")
+        if project_id:
+            qs = qs.filter(project_id=project_id)
+
+        return qs
+
+    def perform_create(self, serializer):
+        serializer.save(user=self.request.user)
 
 
 class RegisterView(APIView):
@@ -1456,8 +1472,16 @@ class TaskWarningListView(APIView):
         """
         Retorna warnings de tareas.
         Filtros: ?task_id=1  ?status=active|resolved  ?project_id=1
+        Sin filtros: devuelve solo warnings de proyectos del usuario autenticado.
         """
-        qs = TaskWarning.objects.select_related("task")
+        user = request.user
+        user_project_ids = Project.objects.filter(
+            Q(created_by=user) | Q(members__user=user)
+        ).distinct().values_list("id_project", flat=True)
+
+        user_board_ids = Board.objects.filter(id_project__in=user_project_ids).values_list("id_board", flat=True)
+        qs = TaskWarning.objects.select_related("task").filter(task__id_board__in=user_board_ids)
+
         task_id = request.query_params.get("task_id")
         warn_status = request.query_params.get("status")
         project_id = request.query_params.get("project_id")
@@ -1467,9 +1491,8 @@ class TaskWarningListView(APIView):
         if warn_status:
             qs = qs.filter(status=warn_status)
         if project_id:
-            qs = qs.filter(
-                task__id_board__in=Board.objects.filter(id_project=project_id).values_list("id_board", flat=True)
-            )
+            project_board_ids = Board.objects.filter(id_project=project_id).values_list("id_board", flat=True)
+            qs = qs.filter(task__id_board__in=project_board_ids)
 
         serializer = TaskWarningSerializer(qs[:100], many=True)
         return Response(serializer.data)
