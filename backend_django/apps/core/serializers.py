@@ -1,5 +1,6 @@
 from rest_framework import serializers
 from django.contrib.auth.hashers import make_password
+from drf_spectacular.utils import extend_schema_field
 
 from .models import (
     ActivityLog,
@@ -97,6 +98,13 @@ class TaskPrioritySerializer(serializers.ModelSerializer):
         fields = "__all__"
 
 
+class TaskAssignedUserSerializer(serializers.Serializer):
+    id_user = serializers.IntegerField()
+    email = serializers.EmailField()
+    username = serializers.CharField()
+    id_assignment = serializers.IntegerField()
+
+
 class TaskSerializer(serializers.ModelSerializer):
     assigned_users = serializers.SerializerMethodField()
 
@@ -104,6 +112,7 @@ class TaskSerializer(serializers.ModelSerializer):
         model = Task
         fields = "__all__"
 
+    @extend_schema_field(TaskAssignedUserSerializer(many=True))
     def get_assigned_users(self, obj):
         """Return list of assigned users with their details"""
         assignments = obj.assignments.all()

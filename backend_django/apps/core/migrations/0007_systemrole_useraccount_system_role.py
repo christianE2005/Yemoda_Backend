@@ -22,6 +22,10 @@ class Migration(migrations.Migration):
                     (1, 'Admin', 'Administrador del sistema con acceso total'),
                     (2, 'User', 'Usuario estándar de la plataforma')
                 ON CONFLICT (id_system_role) DO NOTHING;
+                SELECT setval(
+                    pg_get_serial_sequence('system_role', 'id_system_role'),
+                    (SELECT MAX(id_system_role) FROM system_role)
+                );
             """,
             reverse_sql="DROP TABLE IF EXISTS system_role;",
         ),
