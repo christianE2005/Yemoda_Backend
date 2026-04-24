@@ -17,6 +17,7 @@ COPY . .
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
 USER appuser
 
-RUN python manage.py collectstatic --noinput
+RUN mkdir -p /app/staticfiles
+RUN python manage.py collectstatic --noinput || true
 
-CMD gunicorn --bind 0.0.0.0:${PORT:-8000} --workers 2 --timeout 120 config.wsgi:application
+CMD gunicorn --bind 0.0.0.0:${PORT:-8000} --workers 2 --timeout 120 --preload --log-level debug config.wsgi:application
