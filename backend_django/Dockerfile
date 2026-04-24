@@ -17,6 +17,6 @@ COPY . .
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
 USER appuser
 
-RUN python manage.py migrate --noinput || true
+RUN python manage.py collectstatic --noinput
 
 CMD gunicorn --bind 0.0.0.0:${PORT:-8000} --workers 2 --timeout 120 config.wsgi:application
