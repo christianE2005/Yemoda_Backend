@@ -69,7 +69,7 @@ async def _run_push_analysis(payload: dict, db: Session) -> None:
         logger.warning("Empty diff for %s (%s...%s) — cannot run analysis", repo_full_name, before[:7], after[:7])
         return
 
-    logger.info("Got diff (%d chars) — sending to Gemini", len(diff))
+    logger.info("Got diff (%d chars) — sending to Claude", len(diff))
 
     push_event = create_or_get_push_event(
         db,
@@ -96,7 +96,7 @@ async def _run_push_analysis(payload: dict, db: Session) -> None:
     try:
         analysis = analyze_push(stories, diff, active_warnings=active_warnings_map)
     except Exception as exc:
-        logger.error("Gemini analysis failed: %s", exc)
+        logger.error("Claude analysis failed: %s", exc)
         return
 
     review_status = get_review_status(db)
@@ -167,7 +167,7 @@ async def github_push_webhook(
     x_github_event: str = Header(default=""),
 ):
     """
-    Receives GitHub push webhooks, analyzes code changes with Gemini AI,
+    Receives GitHub push webhooks, analyzes code changes with Claude AI,
     and updates the matching user stories (moves to Review + adds comment).
     """
     payload_bytes = await request.body()
