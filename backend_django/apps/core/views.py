@@ -566,11 +566,20 @@ class ActivityLogViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        user_project_ids = Project.objects.filter(
-            Q(created_by=user) | Q(members__user=user)
-        ).filter(repos__isnull=False).distinct().values_list("id_project", flat=True)
 
-        qs = ActivityLog.objects.filter(project_id__in=user_project_ids).order_by("-created_at")
+        # All project IDs that have at least one repo in project_repo table
+        projects_with_repos = ProjectRepo.objects.values_list("project_id", flat=True).distinct()
+
+        # User's projects that also have repos (not personal projects without repos)
+        user_project_ids = Project.objects.filter(
+            Q(created_by=user) | Q(members__user=user),
+            id_project__in=projects_with_repos,
+        ).distinct().values_list("id_project", flat=True)
+
+        # Only show logs that are explicitly linked to one of those projects
+        qs = ActivityLog.objects.filter(
+            project_id__in=user_project_ids
+        ).order_by("-created_at")
 
         project_id = self.request.query_params.get("project_id")
         if project_id:
@@ -579,6 +588,7 @@ class ActivityLogViewSet(viewsets.ModelViewSet):
         return qs
 
     def perform_create(self, serializer):
+        # If the frontend sends project_id, use it; otherwise leave null
         serializer.save(user=self.request.user)
 
 

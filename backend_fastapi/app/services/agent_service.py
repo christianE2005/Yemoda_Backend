@@ -61,7 +61,7 @@ def analyze_push(
     diff: str,
     active_warnings: dict[int, list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
-    """Send stories + diff + active warnings to Gemini and return structured analysis."""
+    """Send stories + diff + active warnings to Claude and return structured analysis."""
     stories_text = "\n".join(
         f"- ID {s['id']}: {s['title']}\n  Description: {s['description'] or 'No description provided.'}"
         for s in stories
