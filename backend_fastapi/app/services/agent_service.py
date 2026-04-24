@@ -1,7 +1,7 @@
 import json
 from typing import Any
 
-from backend_fastapi.app.core.anthropic import generate_content
+from app.core.gemini import generate_content
 
 _PROMPT_TEMPLATE = """\
 You are an expert code reviewer and project manager assistant.
