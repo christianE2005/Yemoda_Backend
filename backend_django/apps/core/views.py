@@ -1509,6 +1509,27 @@ class TaskWarningListView(APIView):
         return Response(serializer.data)
 
 
+class TaskWarningDetailView(APIView):
+    @extend_schema(responses={204: None, 403: dict, 404: dict}, tags=["warnings"])
+    def delete(self, request, warning_id: int):
+        """Elimina un warning. Solo miembros del proyecto al que pertenece la tarea pueden borrarlo."""
+        warning = TaskWarning.objects.select_related("task__board__project").filter(pk=warning_id).first()
+        if not warning:
+            return Response({"detail": "Warning no encontrado."}, status=status.HTTP_404_NOT_FOUND)
+
+        project = warning.task.board.project
+        user = request.user
+        is_member = (
+            project.created_by == user
+            or ProjectMember.objects.filter(project=project, user=user).exists()
+        )
+        if not is_member:
+            return Response({"detail": "No tienes permiso para eliminar este warning."}, status=status.HTTP_403_FORBIDDEN)
+
+        warning.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
 class TaskHistoryView(APIView):
     @extend_schema(
         responses={200: TaskPushMatchSerializer(many=True)},
