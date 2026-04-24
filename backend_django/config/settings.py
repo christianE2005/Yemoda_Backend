@@ -1,4 +1,5 @@
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 import os
 from dotenv import load_dotenv
 
@@ -65,16 +66,41 @@ TEMPLATES = [
 WSGI_APPLICATION = "config.wsgi.application"
 ASGI_APPLICATION = "config.asgi.application"
 
-DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.postgresql",
-        "NAME": os.getenv("DB_NAME", "app_db"),
-        "USER": os.getenv("DB_USER", "postgres"),
-        "PASSWORD": os.getenv("DB_PASSWORD", "postgres"),
-        "HOST": os.getenv("DB_HOST", "localhost"),
-        "PORT": os.getenv("DB_PORT", "5432"),
+_raw_db_url = os.getenv("DATABASE_URL", "")
+if _raw_db_url.startswith("postgres://"):
+    _raw_db_url = "postgresql" + _raw_db_url[len("postgres"):]
+
+if _raw_db_url:
+    _db = urlparse(_raw_db_url)
+    _db_opts: dict = {}
+    if _db.query:
+        for _pair in _db.query.split("&"):
+            if "=" in _pair:
+                _k, _v = _pair.split("=", 1)
+                if _k == "sslmode":
+                    _db_opts["sslmode"] = _v
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.postgresql",
+            "NAME": unquote(_db.path.lstrip("/")),
+            "USER": unquote(_db.username or ""),
+            "PASSWORD": unquote(_db.password or ""),
+            "HOST": _db.hostname or "localhost",
+            "PORT": str(_db.port or 5432),
+            "OPTIONS": _db_opts,
+        }
     }
-}
+else:
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.postgresql",
+            "NAME": os.getenv("DB_NAME", "app_db"),
+            "USER": os.getenv("DB_USER", "postgres"),
+            "PASSWORD": os.getenv("DB_PASSWORD", "postgres"),
+            "HOST": os.getenv("DB_HOST", "localhost"),
+            "PORT": os.getenv("DB_PORT", "5432"),
+        }
+    }
 
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
