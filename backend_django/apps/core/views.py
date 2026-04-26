@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
 import json
+import csv
 import secrets
 from urllib.parse import urlencode
 
@@ -1552,6 +1553,229 @@ class TaskHistoryView(APIView):
         )
         serializer = TaskPushMatchSerializer(matches, many=True)
         return Response(serializer.data)
+
+
+class TaskMatchFeedbackView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        request={"application/json": {"type": "object", "properties": {"feedback": {"type": "string"}}}},
+        responses={200: TaskPushMatchSerializer, 400: dict, 403: dict, 404: dict},
+        tags=["tasks"],
+        summary="Marcar match como correcto/incorrecto",
+    )
+    def post(self, request, match_id: int):
+        match = TaskPushMatch.objects.select_related("task", "task__board__project").filter(pk=match_id).first()
+        if not match:
+            return Response({"detail": "Match no encontrado."}, status=status.HTTP_404_NOT_FOUND)
+
+        project = match.task.board.project
+        is_member = (
+            project.created_by == request.user
+            or ProjectMember.objects.filter(project=project, user=request.user).exists()
+        )
+        if not is_member:
+            return Response({"detail": "No tienes permiso para marcar este match."}, status=status.HTTP_403_FORBIDDEN)
+
+        feedback = request.data.get("feedback")
+        if feedback not in (TaskPushMatch.FEEDBACK_CORRECT, TaskPushMatch.FEEDBACK_INCORRECT):
+            return Response({"detail": "Feedback inválido. Use 'correct' o 'incorrect'."}, status=status.HTTP_400_BAD_REQUEST)
+
+        match.feedback = feedback
+        match.save()
+        return Response(TaskPushMatchSerializer(match).data, status=status.HTTP_200_OK)
+
+
+class MatchesExportCSVView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        responses={200: None},
+        tags=["tasks"],
+        summary="Exportar TaskPushMatch como CSV",
+    )
+    def get(self, request):
+        project_id = request.query_params.get("project_id")
+        user = request.user
+
+        user_project_ids = Project.objects.filter(
+            Q(members__user=user) | Q(created_by=user)
+        ).distinct().values_list("id_project", flat=True)
+
+        if project_id:
+            try:
+                pid = int(project_id)
+            except ValueError:
+                return Response({"detail": "project_id inválido."}, status=status.HTTP_400_BAD_REQUEST)
+            if pid not in user_project_ids:
+                return Response({"detail": "No tienes acceso a este proyecto."}, status=status.HTTP_403_FORBIDDEN)
+            project_ids = [pid]
+        else:
+            project_ids = list(user_project_ids)
+
+        matches = TaskPushMatch.objects.select_related("task", "push", "task__board__project")
+        if project_ids:
+            matches = matches.filter(task__board__project__id_project__in=project_ids)
+        matches = matches.order_by("-created_at")
+
+        filename = f"task_push_matches_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}.csv"
+        response = HttpResponse(content_type="text/csv")
+        response["Content-Disposition"] = f'attachment; filename="{filename}"'
+
+        writer = csv.writer(response)
+        writer.writerow([
+            "id_match",
+            "task_id",
+            "task_title",
+            "task_description",
+            "push_id",
+            "push_repo",
+            "push_ref",
+            "push_commits",
+            "created_at",
+            "similarity",
+            "model_name",
+            "feedback",
+            "coverage",
+            "reason",
+            "code_snippet",
+        ])
+
+        for m in matches:
+            writer.writerow([
+                m.id_match,
+                m.task.id_task if m.task else None,
+                (m.task.title if m.task else "")[:1000],
+                (m.task.description if m.task else "")[:4000],
+                m.push.id_push if m.push else None,
+                (m.push.repo_full_name if m.push else "")[:255],
+                (m.push.ref if m.push else "")[:255],
+                json.dumps(m.push.commits) if m.push and m.push.commits is not None else "",
+                m.created_at.isoformat() if m.created_at else "",
+                m.similarity if hasattr(m, "similarity") else None,
+                m.model_name if hasattr(m, "model_name") else None,
+                m.feedback if hasattr(m, "feedback") else None,
+                m.coverage,
+                (m.reason or "")[:4000],
+                (m.code_snippet or "")[:4000],
+            ])
+
+        return response
+
+
+class PushMatchesForPushView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        responses={200: TaskPushMatchSerializer(many=True)},
+        tags=["tasks"],
+        summary="Listar matches para un push",
+    )
+    def get(self, request, push_id: int):
+        push = GithubPushEvent.objects.select_related("project").filter(pk=push_id).first()
+        if not push:
+            return Response({"detail": "Push no encontrado."}, status=status.HTTP_404_NOT_FOUND)
+
+        user = request.user
+        project = push.project
+        is_member = (
+            project and (
+                project.created_by == user
+                or ProjectMember.objects.filter(project=project, user=user).exists()
+            )
+        )
+        if not is_member:
+            return Response({"detail": "No tienes acceso a este push."}, status=status.HTTP_403_FORBIDDEN)
+
+        matches = TaskPushMatch.objects.select_related("task", "push").filter(push=push).order_by("-created_at")
+        serializer = TaskPushMatchSerializer(matches, many=True)
+        return Response(serializer.data)
+
+
+class PushMatchesBulkFeedbackView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        request={"application/json": {"type": "object", "properties": {
+            "confirmed_matches": {"type": "array", "items": {"type": "integer"}},
+            "incorrect_matches": {"type": "array", "items": {"type": "integer"}},
+            "missed_task_ids": {"type": "array", "items": {"type": "integer"}},
+        }}},
+        responses={200: dict, 400: dict, 403: dict},
+        tags=["tasks"],
+        summary="Enviar feedback en lote para matches de un push",
+    )
+    def post(self, request, push_id: int):
+        push = GithubPushEvent.objects.select_related("project").filter(pk=push_id).first()
+        if not push:
+            return Response({"detail": "Push no encontrado."}, status=status.HTTP_404_NOT_FOUND)
+
+        user = request.user
+        project = push.project
+        is_member = (
+            project and (
+                project.created_by == user
+                or ProjectMember.objects.filter(project=project, user=user).exists()
+            )
+        )
+        if not is_member:
+            return Response({"detail": "No tienes acceso a este push."}, status=status.HTTP_403_FORBIDDEN)
+
+        data = request.data or {}
+        confirmed = data.get("confirmed_matches", []) or []
+        incorrect = data.get("incorrect_matches", []) or []
+        missed = data.get("missed_task_ids", []) or []
+
+        results = {"confirmed_updated": 0, "incorrect_updated": 0, "missed_created": 0, "invalid_ids": []}
+
+        # Update confirmed matches
+        for mid in confirmed:
+            m = TaskPushMatch.objects.filter(pk=mid, push=push).first()
+            if not m:
+                results["invalid_ids"].append({"type": "confirmed", "id": mid})
+                continue
+            m.feedback = TaskPushMatch.FEEDBACK_CORRECT
+            m.save()
+            results["confirmed_updated"] += 1
+
+        # Update incorrect matches
+        for mid in incorrect:
+            m = TaskPushMatch.objects.filter(pk=mid, push=push).first()
+            if not m:
+                results["invalid_ids"].append({"type": "incorrect", "id": mid})
+                continue
+            m.feedback = TaskPushMatch.FEEDBACK_INCORRECT
+            m.save()
+            results["incorrect_updated"] += 1
+
+        # Create matches for missed tasks
+        for tid in missed:
+            task = Task.objects.filter(pk=tid).first()
+            if not task or task.board.project_id != (project.id_project if project else None):
+                results["invalid_ids"].append({"type": "missed", "id": tid})
+                continue
+
+            # Create a manual match record (if doesn't already exist)
+            existing = TaskPushMatch.objects.filter(task=task, push=push).first()
+            if existing:
+                existing.feedback = TaskPushMatch.FEEDBACK_CORRECT
+                existing.reason = (existing.reason or "") + "; user_labeled_missed"
+                existing.model_name = existing.model_name or "manual"
+                existing.save()
+            else:
+                TaskPushMatch.objects.create(
+                    task=task,
+                    push=push,
+                    coverage=TaskPushMatch.COVERAGE_FULL,
+                    reason="user_labeled_missed",
+                    code_snippet=None,
+                    similarity=None,
+                    model_name="manual",
+                    feedback=TaskPushMatch.FEEDBACK_CORRECT,
+                )
+                results["missed_created"] += 1
+
+        return Response(results)
 
 
 class HealthCheckView(APIView):

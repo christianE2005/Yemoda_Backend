@@ -297,3 +297,74 @@ Copia `backend_fastapi/.env.example` → `backend_fastapi/.env`.
 - Usar secretos distintos para `DJANGO_SECRET_KEY` y `JWT_SECRET_KEY`
 - El endpoint de instalación de GitHub App (`/api/github/app/install/start/`) requiere rol **Admin** (`system_role_id=1`)
 - Los webhooks de GitHub se validan con firma HMAC-SHA256
+
+---
+
+## 3) Match & Feedback endpoints (IA)
+
+Estos endpoints permiten exportar los matches generados por el agente IA, revisar matches por push y que los desarrolladores confirmen/etiqueten los resultados. El flujo esperado es:
+
+- El agente ML intenta emparejar el diff con historias de usuario y crea `TaskPushMatch` (con `similarity` y `model_name`).
+- Los desarrolladores revisan los matches y usan el endpoint bulk para confirmar/descartar y añadir matches perdidos.
+- Se puede exportar todo a CSV para análisis y entrenamiento offline.
+
+Endpoints relevantes (Django API):
+
+- `GET /api/matches/export/?project_id=<id>`
+  - Auth: requiere token Bearer y pertenecer al proyecto (o admin).
+  - Descripción: descarga un CSV con todos los `TaskPushMatch` en los proyectos accesibles o en `project_id` si se proporciona.
+  - Columnas principales en CSV: `id_match, task_id, task_title, task_description, push_id, push_repo, push_ref, push_commits, created_at, similarity, model_name, feedback, coverage, reason, code_snippet`.
+
+- `GET /api/pushes/<push_id>/matches/`
+  - Auth: requiere token Bearer y pertenecer al proyecto del push.
+  - Descripción: lista JSON de `TaskPushMatch` asociados a ese push (útil para mostrar en UI antes de etiquetar).
+
+- `POST /api/pushes/<push_id>/matches/confirm/`
+  - Auth: requiere token Bearer y pertenecer al proyecto del push.
+  - Payload JSON:
+    ```json
+    {
+      "confirmed_matches": [123, 124],
+      "incorrect_matches": [125],
+      "missed_task_ids": [10, 11]
+    }
+    ```
+  - Descripción: confirma en bloque qué matches estaban correctos, cuáles fueron incorrectos, y permite crear registros `TaskPushMatch` manuales para tareas que el ML omitió (`missed_task_ids`). Devuelve conteos de acciones realizadas.
+
+- `POST /api/matches/<match_id>/feedback/`
+  - Auth: requiere token Bearer y pertenecer al proyecto de la historia relacionada.
+  - Payload JSON:
+    ```json
+    { "feedback": "correct" }
+    ```
+    o
+    ```json
+    { "feedback": "incorrect" }
+    ```
+  - Descripción: marca un `TaskPushMatch` individual como correcto o incorrecto (campo `feedback`).
+
+Ejemplo rápido (curl):
+
+```
+curl -H "Authorization: Bearer $TOKEN" \
+  "https://your-host/api/pushes/42/matches/"
+
+curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"confirmed_matches": [1,2], "incorrect_matches": [3], "missed_task_ids": [10]}' \
+  "https://your-host/api/pushes/42/matches/confirm/"
+
+curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"feedback": "correct"}' \
+  "https://your-host/api/matches/7/feedback/"
+```
+
+Dónde mirar en el código:
+
+- Implementación export CSV: [backend_django/apps/core/views.py](backend_django/apps/core/views.py#L1548-L1628)
+- Listar matches por push: [backend_django/apps/core/views.py](backend_django/apps/core/views.py#L1628-L1690)
+- Bulk feedback para push: [backend_django/apps/core/views.py](backend_django/apps/core/views.py#L1690-L1790)
+- FastAPI webhook / persistencia de `similarity`/`model_name`: [backend_fastapi/app/routers/webhook.py](backend_fastapi/app/routers/webhook.py#L1-L340)
+
+---
+
+Con esto ya puedes descargar el Excel / CSV, etiquetar localmente y volver a subir etiquetas con `POST /api/pushes/<push_id>/matches/confirm/` o marcar individualmente con `POST /api/matches/<match_id>/feedback/`.

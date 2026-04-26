@@ -421,6 +421,19 @@ class TaskPushMatch(models.Model):
     coverage = models.CharField(max_length=10, choices=COVERAGE_CHOICES, default=COVERAGE_PARTIAL)
     reason = models.TextField(null=True, blank=True)
     code_snippet = models.TextField(null=True, blank=True)
+    # ML metadata
+    similarity = models.FloatField(null=True, blank=True)
+    model_name = models.CharField(max_length=200, null=True, blank=True)
+
+    FEEDBACK_UNKNOWN = "unknown"
+    FEEDBACK_CORRECT = "correct"
+    FEEDBACK_INCORRECT = "incorrect"
+    FEEDBACK_CHOICES = [
+        (FEEDBACK_UNKNOWN, "Unknown"),
+        (FEEDBACK_CORRECT, "Correct"),
+        (FEEDBACK_INCORRECT, "Incorrect"),
+    ]
+    feedback = models.CharField(max_length=20, choices=FEEDBACK_CHOICES, default=FEEDBACK_UNKNOWN)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

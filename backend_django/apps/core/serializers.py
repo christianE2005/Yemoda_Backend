@@ -217,6 +217,9 @@ class TaskPushMatchSerializer(serializers.ModelSerializer):
         model = TaskPushMatch
         fields = [
             "id_match",
+            "similarity",
+            "model_name",
+            "feedback",
             "coverage",
             "reason",
             "code_snippet",

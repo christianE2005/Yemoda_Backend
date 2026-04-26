@@ -35,3 +35,12 @@ engine_url = URL.create(
 engine = create_engine(engine_url, future=True)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
 Base = declarative_base()
+
+
+def get_db():
+    """FastAPI dependency that yields a DB session and ensures closure."""
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()

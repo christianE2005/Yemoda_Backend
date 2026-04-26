@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.core.database import SessionLocal
 from app.services.agent_service import analyze_push, analyze_story
-from app.services.ml_service import match_stories
+from app.services.ml_service import match_stories, ML_HIGH_SIM, ML_DISCARD_SIM, ML_TOP_K, ML_EMBED_MODEL
 from app.services.github_service import fetch_push_diff
 from app.services.task_service import (
     add_agent_comment,
@@ -82,9 +82,9 @@ async def _run_push_analysis(payload: dict, db: Session) -> None:
         commits=commits,
     )
 
-    # Use ML matcher to find candidate stories
+    # Use ML matcher to find candidate stories (get all similarities, webhook will apply thresholds)
     try:
-        matches = match_stories(db, repo_full_name, diff, top_k=3, min_sim=0.55)
+        matches = match_stories(db, repo_full_name, diff, top_k=None, min_sim=None)
     except Exception as exc:
         logger.error("ML matching failed: %s", exc)
         matches = []
@@ -101,8 +101,15 @@ async def _run_push_analysis(payload: dict, db: Session) -> None:
     review_status = get_review_status(db)
     review_status_id = review_status.id_status if review_status else None
 
-    # If no ML matches, fallback to full Claude analysis
-    if not matches:
+    # Categorize matches into three ranges: high confidence, gray zone, discarded
+    high_matches = [m for m in matches if m.get("similarity", 0.0) >= ML_HIGH_SIM]
+    gray_matches = [m for m in matches if ML_DISCARD_SIM <= m.get("similarity", 0.0) < ML_HIGH_SIM]
+    discarded_count = len([m for m in matches if m.get("similarity", 0.0) < ML_DISCARD_SIM])
+
+    logger.info("ML match counts: high=%d gray=%d discarded=%d", len(high_matches), len(gray_matches), discarded_count)
+
+    # If no ML matches above discard threshold at all, fallback to full Claude analysis
+    if not high_matches and not gray_matches:
         logger.info("No ML matches found — falling back to full Claude analysis")
         try:
             stories = [
@@ -144,6 +151,8 @@ async def _run_push_analysis(payload: dict, db: Session) -> None:
                 coverage=coverage,
                 reason=match.get("reason"),
                 code_snippet=code_snippet,
+                similarity=match.get("similarity"),
+                model_name=ML_EMBED_MODEL,
             )
             logger.info("TaskPushMatch saved for story %s (push %s).", story_id, push_event.id_push)
 
@@ -163,45 +172,55 @@ async def _run_push_analysis(payload: dict, db: Session) -> None:
             logger.info("Story %s moved to Review and comment added.", story_id)
 
         return
-
-    # Process ML matches — only call Claude per-story when needed
-    HIGH_SIM = 0.75
-    for m in matches:
+    # Process high-confidence matches first (limit to ML_TOP_K)
+    processed_ids = set()
+    for m in high_matches[:ML_TOP_K]:
         story_id = m.get("story_id")
+        similarity = m.get("similarity", 0.0)
+        if story_id in processed_ids:
+            continue
+        task = next((t for t in tasks if t.id_task == story_id), None)
+        if not task:
+            continue
+
+        if review_status_id:
+            move_task_to_review(db, task, review_status_id)
+
+        create_push_match(
+            db,
+            task_id=story_id,
+            push_id=push_event.id_push,
+            coverage="full",
+            reason=f"Matched by ML (similarity={similarity:.2f})",
+            code_snippet=None,
+            similarity=similarity,
+            model_name=ML_EMBED_MODEL,
+        )
+        add_agent_comment(
+            db,
+            story_id,
+            "\n".join(
+                [
+                    "🤖 **Análisis ML — Push detectado**",
+                    "**Cobertura:** ✅ Completa",
+                    f"**Confianza ML:** {similarity:.2f}",
+                    "No se detectaron warnings automáticos.",
+                ]
+            ),
+        )
+        processed_ids.add(story_id)
+        logger.info("Task %s matched with high confidence (%.2f). Moved to Review.", story_id, similarity)
+
+    # Process gray-zone matches (limit to ML_TOP_K)
+    for m in gray_matches[:ML_TOP_K]:
+        story_id = m.get("story_id")
+        if story_id in processed_ids:
+            continue
         similarity = m.get("similarity", 0.0)
         task = next((t for t in tasks if t.id_task == story_id), None)
         if not task:
             continue
 
-        if similarity >= HIGH_SIM:
-            # High confidence: mark as full coverage and move to review without warnings
-            if review_status_id:
-                move_task_to_review(db, task, review_status_id)
-
-            create_push_match(
-                db,
-                task_id=story_id,
-                push_id=push_event.id_push,
-                coverage="full",
-                reason=f"Matched by ML (similarity={similarity:.2f})",
-                code_snippet=None,
-            )
-            add_agent_comment(
-                db,
-                story_id,
-                "\n".join(
-                    [
-                        "🤖 **Análisis ML — Push detectado**",
-                        "**Cobertura:** ✅ Completa",
-                        f"**Confianza ML:** {similarity:.2f}",
-                        "No se detectaron warnings automáticos.",
-                    ]
-                ),
-            )
-            logger.info("Task %s matched with high confidence (%.2f). Moved to Review.", story_id, similarity)
-            continue
-
-        # Zone gray: ask Claude to evaluate this specific story
         try:
             story_obj = {"id": story_id, "title": m.get("title"), "description": m.get("description")}
             awarnings = active_warnings_map.get(story_id, [])
@@ -220,7 +239,6 @@ async def _run_push_analysis(payload: dict, db: Session) -> None:
             move_task_to_review(db, task, review_status_id)
 
         for rid in resolved_ids:
-            # resolve if exists
             task_warns = get_active_warnings(db, story_id)
             for w in task_warns:
                 if w.id_warning == rid:
@@ -239,6 +257,8 @@ async def _run_push_analysis(payload: dict, db: Session) -> None:
             coverage="full" if complies else "partial",
             reason=reason,
             code_snippet=code_snippet,
+            similarity=similarity,
+            model_name=ML_EMBED_MODEL,
         )
 
         lines = [
@@ -254,6 +274,7 @@ async def _run_push_analysis(payload: dict, db: Session) -> None:
             lines.extend(f"- {w}" for w in new_warnings)
 
         add_agent_comment(db, story_id, "\n".join(lines))
+        processed_ids.add(story_id)
         logger.info("Story %s processed (similarity=%.2f). Moved to Review and comment added.", story_id, similarity)
 
 

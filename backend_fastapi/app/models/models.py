@@ -1,4 +1,4 @@
-from sqlalchemy import JSON, Date, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import JSON, Date, DateTime, ForeignKey, Integer, String, Text, Float, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -213,4 +213,7 @@ class TaskPushMatch(Base):
     coverage: Mapped[str] = mapped_column(String(10), nullable=False, default="partial")
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     code_snippet: Mapped[str | None] = mapped_column(Text, nullable=True)
+    similarity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    model_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    feedback: Mapped[str | None] = mapped_column(String(20), nullable=True)
     created_at: Mapped[DateTime] = mapped_column(DateTime, server_default=func.now())

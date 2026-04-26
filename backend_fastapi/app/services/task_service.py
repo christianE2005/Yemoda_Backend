@@ -86,6 +86,8 @@ def create_push_match(
     coverage: str,
     reason: str | None,
     code_snippet: str | None,
+    similarity: float | None = None,
+    model_name: str | None = None,
 ) -> TaskPushMatch:
     """Create or update a TaskPushMatch record linking a task to a push event."""
     existing = (
@@ -97,6 +99,8 @@ def create_push_match(
         existing.coverage = coverage
         existing.reason = reason
         existing.code_snippet = code_snippet
+        existing.similarity = similarity
+        existing.model_name = model_name
         db.commit()
         db.refresh(existing)
         return existing
@@ -107,6 +111,8 @@ def create_push_match(
         coverage=coverage,
         reason=reason,
         code_snippet=code_snippet,
+        similarity=similarity,
+        model_name=model_name,
     )
     db.add(match)
     db.commit()
