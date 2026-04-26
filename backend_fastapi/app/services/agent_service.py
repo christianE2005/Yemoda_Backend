@@ -100,3 +100,78 @@ def analyze_push(
         text = text[start:end]
 
     return json.loads(text)
+
+
+# Prompt for analyzing a single story against a diff (returns small JSON)
+_STORY_PROMPT_TEMPLATE = """\
+You are an expert code reviewer.
+
+User Story:
+ID: {story_id}
+Title: {title}
+Description / Acceptance Criteria: {description}
+
+Active warnings on this story:
+{warnings}
+
+Code changes (diff snippet):
+{diff}
+
+Instructions:
+1) Determine if the provided code changes fully satisfy the acceptance criteria for this single user story.
+2) If they fully satisfy the criteria, respond with JSON: {"complies": true, "reason": "<brief explanation>", "new_warnings": [], "resolved_warning_ids": [], "code_snippet": "<relevant lines>"}
+3) If they do not satisfy the criteria, respond with JSON: {"complies": false, "reason": "<brief explanation>", "new_warnings": ["<short warning 1>", "<short warning 2>"], "resolved_warning_ids": [], "code_snippet": "<relevant lines>"}
+
+Respond ONLY with valid JSON and nothing else.
+"""
+
+
+def analyze_story(
+    story: dict[str, Any],
+    diff: str,
+    active_warnings: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Analyze a single story against a diff using Claude and return structured JSON.
+
+    The returned dict must contain at least: `complies` (bool), `reason` (str),
+    `new_warnings` (list[str]), `resolved_warning_ids` (list[int]), `code_snippet` (str).
+    """
+    warnings_text = "None." if not active_warnings else "\n".join(
+        f"- Warning ID {w.get('id')}: {w.get('message')}" for w in active_warnings
+    )
+
+    prompt = _STORY_PROMPT_TEMPLATE.format(
+        story_id=story.get("id") or story.get("story_id", ""),
+        title=story.get("title", "<no title>"),
+        description=story.get("description", "No description provided."),
+        warnings=warnings_text,
+        diff=diff[:_MAX_DIFF_CHARS],
+    )
+
+    text = generate_content(prompt, json_mode=True).strip()
+
+    # Strip code fences if any
+    if text.startswith("```"):
+        parts = text.split("```")
+        text = parts[1] if len(parts) > 1 else text
+        if text.startswith("json"):
+            text = text[4:].strip()
+
+    start = text.find("{")
+    end = text.rfind("}") + 1
+    if start != -1 and end > start:
+        text = text[start:end]
+
+    try:
+        parsed = json.loads(text)
+    except Exception as exc:
+        raise RuntimeError(f"Could not parse JSON from model response: {exc}\nResponse:\n{text}")
+
+    # Normalize fields
+    parsed.setdefault("complies", False)
+    parsed.setdefault("reason", "")
+    parsed.setdefault("new_warnings", [])
+    parsed.setdefault("resolved_warning_ids", [])
+    parsed.setdefault("code_snippet", None)
+
+    return parsed

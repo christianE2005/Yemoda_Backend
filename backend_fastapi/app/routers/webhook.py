@@ -8,7 +8,8 @@ from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request, 
 from sqlalchemy.orm import Session
 
 from app.core.database import SessionLocal
-from app.services.agent_service import analyze_push
+from app.services.agent_service import analyze_push, analyze_story
+from app.services.ml_service import match_stories
 from app.services.github_service import fetch_push_diff
 from app.services.task_service import (
     add_agent_comment,
@@ -69,8 +70,9 @@ async def _run_push_analysis(payload: dict, db: Session) -> None:
         logger.warning("Empty diff for %s (%s...%s) — cannot run analysis", repo_full_name, before[:7], after[:7])
         return
 
-    logger.info("Got diff (%d chars) — sending to Claude", len(diff))
+    logger.info("Got diff (%d chars)", len(diff))
 
+    # Create or fetch push event record
     push_event = create_or_get_push_event(
         db,
         project_id=project.id_project,
@@ -80,11 +82,14 @@ async def _run_push_analysis(payload: dict, db: Session) -> None:
         commits=commits,
     )
 
-    stories = [
-        {"id": t.id_task, "title": t.title, "description": t.description}
-        for t in tasks
-    ]
+    # Use ML matcher to find candidate stories
+    try:
+        matches = match_stories(db, repo_full_name, diff, top_k=3, min_sim=0.55)
+    except Exception as exc:
+        logger.error("ML matching failed: %s", exc)
+        matches = []
 
+    # Prepare active warnings map
     active_warnings_map: dict[int, list[dict]] = {}
     for t in tasks:
         warnings = get_active_warnings(db, t.id_task)
@@ -93,53 +98,154 @@ async def _run_push_analysis(payload: dict, db: Session) -> None:
                 {"id": w.id_warning, "message": w.message} for w in warnings
             ]
 
-    try:
-        analysis = analyze_push(stories, diff, active_warnings=active_warnings_map)
-    except Exception as exc:
-        logger.error("Claude analysis failed: %s", exc)
-        return
-
     review_status = get_review_status(db)
     review_status_id = review_status.id_status if review_status else None
 
-    for match in analysis.get("matches", []):
-        story_id = match.get("story_id")
+    # If no ML matches, fallback to full Claude analysis
+    if not matches:
+        logger.info("No ML matches found — falling back to full Claude analysis")
+        try:
+            stories = [
+                {"id": t.id_task, "title": t.title, "description": t.description}
+                for t in tasks
+            ]
+            analysis = analyze_push(stories, diff, active_warnings=active_warnings_map)
+        except Exception as exc:
+            logger.error("Claude analysis failed: %s", exc)
+            return
+
+        for match in analysis.get("matches", []):
+            story_id = match.get("story_id")
+            task = next((t for t in tasks if t.id_task == story_id), None)
+            if not task:
+                continue
+
+            if review_status_id:
+                move_task_to_review(db, task, review_status_id)
+
+            resolved_ids = match.get("resolved_warning_ids") or []
+            task_warns = get_active_warnings(db, story_id)
+            for w in task_warns:
+                if w.id_warning in resolved_ids:
+                    resolve_warning(db, w)
+                    logger.info("Warning %s resolved for story %s.", w.id_warning, story_id)
+
+            new_warnings = match.get("new_warnings") or []
+            for msg in new_warnings:
+                create_warning(db, story_id, msg, push_id=push_event.id_push)
+                logger.info("New warning created for story %s: %s", story_id, msg)
+
+            coverage = match.get("coverage", "partial")
+            code_snippet = match.get("code_snippet")
+            create_push_match(
+                db,
+                task_id=story_id,
+                push_id=push_event.id_push,
+                coverage=coverage,
+                reason=match.get("reason"),
+                code_snippet=code_snippet,
+            )
+            logger.info("TaskPushMatch saved for story %s (push %s).", story_id, push_event.id_push)
+
+            coverage_label = "✅ Completa" if coverage == "full" else "⚠️ Parcial"
+            lines = [
+                "🤖 **Análisis de IA — Push detectado**",
+                f"**Cobertura:** {coverage_label}",
+                f"**Razón:** {match.get('reason', '')}",
+            ]
+            if resolved_ids:
+                lines.append(f"\n✅ **Warnings resueltos:** {len(resolved_ids)}")
+            if new_warnings:
+                lines.append("\n⚠️ **Nuevos warnings:**")
+                lines.extend(f"- {w}" for w in new_warnings)
+
+            add_agent_comment(db, story_id, "\n".join(lines))
+            logger.info("Story %s moved to Review and comment added.", story_id)
+
+        return
+
+    # Process ML matches — only call Claude per-story when needed
+    HIGH_SIM = 0.75
+    for m in matches:
+        story_id = m.get("story_id")
+        similarity = m.get("similarity", 0.0)
         task = next((t for t in tasks if t.id_task == story_id), None)
         if not task:
             continue
 
+        if similarity >= HIGH_SIM:
+            # High confidence: mark as full coverage and move to review without warnings
+            if review_status_id:
+                move_task_to_review(db, task, review_status_id)
+
+            create_push_match(
+                db,
+                task_id=story_id,
+                push_id=push_event.id_push,
+                coverage="full",
+                reason=f"Matched by ML (similarity={similarity:.2f})",
+                code_snippet=None,
+            )
+            add_agent_comment(
+                db,
+                story_id,
+                "\n".join(
+                    [
+                        "🤖 **Análisis ML — Push detectado**",
+                        "**Cobertura:** ✅ Completa",
+                        f"**Confianza ML:** {similarity:.2f}",
+                        "No se detectaron warnings automáticos.",
+                    ]
+                ),
+            )
+            logger.info("Task %s matched with high confidence (%.2f). Moved to Review.", story_id, similarity)
+            continue
+
+        # Zone gray: ask Claude to evaluate this specific story
+        try:
+            story_obj = {"id": story_id, "title": m.get("title"), "description": m.get("description")}
+            awarnings = active_warnings_map.get(story_id, [])
+            result = analyze_story(story_obj, diff, active_warnings=awarnings)
+        except Exception as exc:
+            logger.error("Story analysis failed for %s: %s", story_id, exc)
+            continue
+
+        complies = bool(result.get("complies"))
+        reason = result.get("reason", "")
+        new_warnings = result.get("new_warnings") or []
+        resolved_ids = result.get("resolved_warning_ids") or []
+        code_snippet = result.get("code_snippet")
+
         if review_status_id:
             move_task_to_review(db, task, review_status_id)
 
-        resolved_ids = match.get("resolved_warning_ids") or []
-        task_warns = get_active_warnings(db, story_id)
-        for w in task_warns:
-            if w.id_warning in resolved_ids:
-                resolve_warning(db, w)
-                logger.info("Warning %s resolved for story %s.", w.id_warning, story_id)
+        for rid in resolved_ids:
+            # resolve if exists
+            task_warns = get_active_warnings(db, story_id)
+            for w in task_warns:
+                if w.id_warning == rid:
+                    resolve_warning(db, w)
+                    logger.info("Warning %s resolved for story %s.", rid, story_id)
 
-        new_warnings = match.get("new_warnings") or []
         for msg in new_warnings:
             create_warning(db, story_id, msg, push_id=push_event.id_push)
             logger.info("New warning created for story %s: %s", story_id, msg)
 
-        coverage = match.get("coverage", "partial")
-        code_snippet = match.get("code_snippet")
+        coverage_label = "✅ Completa" if complies else "⚠️ Parcial"
         create_push_match(
             db,
             task_id=story_id,
             push_id=push_event.id_push,
-            coverage=coverage,
-            reason=match.get("reason"),
+            coverage="full" if complies else "partial",
+            reason=reason,
             code_snippet=code_snippet,
         )
-        logger.info("TaskPushMatch saved for story %s (push %s).", story_id, push_event.id_push)
 
-        coverage_label = "✅ Completa" if coverage == "full" else "⚠️ Parcial"
         lines = [
-            "🤖 **Análisis de IA — Push detectado**",
-            f"**Cobertura:** {coverage_label}",
-            f"**Razón:** {match.get('reason', '')}",
+            "🤖 **Análisis ML + LLM — Push detectado**",
+            f"**Cobertura estimada:** {coverage_label}",
+            f"**Confianza ML:** {similarity:.2f}",
+            f"**Razón:** {reason}",
         ]
         if resolved_ids:
             lines.append(f"\n✅ **Warnings resueltos:** {len(resolved_ids)}")
@@ -148,7 +254,7 @@ async def _run_push_analysis(payload: dict, db: Session) -> None:
             lines.extend(f"- {w}" for w in new_warnings)
 
         add_agent_comment(db, story_id, "\n".join(lines))
-        logger.info("Story %s moved to Review and comment added.", story_id)
+        logger.info("Story %s processed (similarity=%.2f). Moved to Review and comment added.", story_id, similarity)
 
 
 async def _process_push(payload: dict) -> None:
