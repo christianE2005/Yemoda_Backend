@@ -3,6 +3,7 @@ import logging
 import os
 import threading
 from typing import Any, Dict, List, Optional
+from collections import OrderedDict
 
 import numpy as np
 from sqlalchemy.orm import Session
@@ -20,6 +21,7 @@ ML_HIGH_SIM = float(os.getenv("ML_HIGH_SIM", "0.75"))
 ML_DISCARD_SIM = float(os.getenv("ML_DISCARD_SIM", "0.20"))
 ML_CHUNK_SIZE = int(os.getenv("ML_CHUNK_SIZE_CHARS", "4000"))
 ML_CHUNK_OVERLAP = int(os.getenv("ML_CHUNK_OVERLAP", "200"))
+ML_STORY_EMBED_CACHE_MAX = int(os.getenv("ML_STORY_EMBED_CACHE_MAX", "500"))
 
 
 # Thread-safe singleton model initialization
@@ -60,9 +62,10 @@ def _cosine_sim(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.dot(a, b) / denom)
 
 
-# Simple in-memory cache for story embeddings to avoid recomputing
+# Simple thread-safe LRU-like in-memory cache for story embeddings to avoid recomputing.
 # Key: story id -> (content_hash, embedding numpy array)
-STORY_EMBED_CACHE: Dict[int, tuple[str, np.ndarray]] = {}
+STORY_EMBED_CACHE = OrderedDict()
+_CACHE_LOCK = threading.Lock()
 
 
 def _content_hash(text: str) -> str:
@@ -116,12 +119,18 @@ def match_stories(
     for i, t in enumerate(tasks):
         content = texts[i]
         chash = _content_hash(content)
-        cached = STORY_EMBED_CACHE.get(t.id_task)
-        if cached and cached[0] == chash:
-            task_embs_list[i] = cached[1]
-        else:
-            pending_texts.append(content)
-            pending_indices.append(i)
+        with _CACHE_LOCK:
+            cached = STORY_EMBED_CACHE.get(t.id_task)
+            if cached and cached[0] == chash:
+                task_embs_list[i] = cached[1]
+                # mark as recently used
+                try:
+                    STORY_EMBED_CACHE.move_to_end(t.id_task)
+                except Exception:
+                    pass
+                continue
+        pending_texts.append(content)
+        pending_indices.append(i)
 
     try:
         # Compute embeddings only for pending texts
@@ -129,8 +138,16 @@ def match_stories(
             new_embs = embed_texts(pending_texts)
             for idx, emb in zip(pending_indices, new_embs):
                 task_embs_list[idx] = emb
-                # cache by story id
-                STORY_EMBED_CACHE[tasks[idx].id_task] = (_content_hash(texts[idx]), emb.copy())
+                # cache by story id (thread-safe, bounded size)
+                try:
+                    with _CACHE_LOCK:
+                        STORY_EMBED_CACHE[tasks[idx].id_task] = (_content_hash(texts[idx]), emb.copy())
+                        STORY_EMBED_CACHE.move_to_end(tasks[idx].id_task)
+                        # simple LRU eviction
+                        if len(STORY_EMBED_CACHE) > ML_STORY_EMBED_CACHE_MAX:
+                            STORY_EMBED_CACHE.popitem(last=False)
+                except Exception as exc:
+                    logger.debug("Failed to update STORY_EMBED_CACHE: %s", exc)
 
         # Stack to a numpy array
         task_embs = np.vstack([e for e in task_embs_list])

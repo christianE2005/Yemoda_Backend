@@ -3,7 +3,7 @@
 Monorepo con dos backends en Python para una plataforma de gestión de proyectos estilo Kanban con integración de GitHub y análisis de código con IA.
 
 - **Django**: gestión de usuarios, autenticación JWT, proyectos, tareas y integración con GitHub App.
-- **FastAPI**: agente de IA (Gemini) que analiza push events y vincula cambios a user stories automáticamente.
+- **FastAPI**: agente de IA (Claude) que analiza push events y vincula cambios a user stories automáticamente.
 
 ## Stack tecnológico
 

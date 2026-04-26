@@ -35,6 +35,14 @@ def on_startup() -> None:
         logger.info("DB tables verified OK")
     except Exception as exc:
         logger.warning("Could not connect to DB on startup: %s", exc)
+    # Preload embedding model to reduce cold-start latency on first request
+    try:
+        from app.services.ml_service import _get_model
+
+        _get_model()
+        logger.info("Embedding model preloaded on startup")
+    except Exception as exc:
+        logger.warning("Could not preload embedding model on startup: %s", exc)
 
 
 @app.get("/health")

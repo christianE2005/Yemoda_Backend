@@ -19,8 +19,11 @@ def test_match_stories_simple(monkeypatch):
     def fake_get_active_tasks(db, project_id):
         return tasks
 
-    monkeypatch.setattr("app.services.task_service.get_project_by_repo", fake_get_project_by_repo)
-    monkeypatch.setattr("app.services.task_service.get_active_tasks", fake_get_active_tasks)
+    # Patch both module locations to be robust regardless of import timing
+    monkeypatch.setattr("app.services.task_service.get_project_by_repo", fake_get_project_by_repo, raising=False)
+    monkeypatch.setattr("app.services.task_service.get_active_tasks", fake_get_active_tasks, raising=False)
+    monkeypatch.setattr("app.services.ml_service.get_project_by_repo", fake_get_project_by_repo, raising=False)
+    monkeypatch.setattr("app.services.ml_service.get_active_tasks", fake_get_active_tasks, raising=False)
 
     # Patch embed_texts to return deterministic vectors
     def fake_embed_texts(texts):
@@ -58,8 +61,11 @@ def test_chunking_short_diff(monkeypatch):
     def fake_get_active_tasks(db, project_id):
         return tasks
 
-    monkeypatch.setattr("app.services.task_service.get_project_by_repo", fake_get_project_by_repo)
-    monkeypatch.setattr("app.services.task_service.get_active_tasks", fake_get_active_tasks)
+    # Patch both module locations to be robust regardless of import timing
+    monkeypatch.setattr("app.services.task_service.get_project_by_repo", fake_get_project_by_repo, raising=False)
+    monkeypatch.setattr("app.services.task_service.get_active_tasks", fake_get_active_tasks, raising=False)
+    monkeypatch.setattr("app.services.ml_service.get_project_by_repo", fake_get_project_by_repo, raising=False)
+    monkeypatch.setattr("app.services.ml_service.get_active_tasks", fake_get_active_tasks, raising=False)
 
     def fake_embed_texts(texts):
         # Return simple embeddings

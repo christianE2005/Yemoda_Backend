@@ -12,6 +12,7 @@ from django.conf import settings
 from django.contrib.auth.hashers import check_password, make_password
 from django.http import HttpResponse
 from django.db import models
+from django.db import transaction
 from django.db.models import Q
 from drf_spectacular.utils import extend_schema
 from rest_framework import status, viewsets
@@ -1728,52 +1729,54 @@ class PushMatchesBulkFeedbackView(APIView):
 
         results = {"confirmed_updated": 0, "incorrect_updated": 0, "missed_created": 0, "invalid_ids": []}
 
-        # Update confirmed matches
-        for mid in confirmed:
-            m = TaskPushMatch.objects.filter(pk=mid, push=push).first()
-            if not m:
-                results["invalid_ids"].append({"type": "confirmed", "id": mid})
-                continue
-            m.feedback = TaskPushMatch.FEEDBACK_CORRECT
-            m.save()
-            results["confirmed_updated"] += 1
+        # Perform DB updates atomically
+        with transaction.atomic():
+            # Update confirmed matches
+            for mid in confirmed:
+                m = TaskPushMatch.objects.filter(pk=mid, push=push).first()
+                if not m:
+                    results["invalid_ids"].append({"type": "confirmed", "id": mid})
+                    continue
+                m.feedback = TaskPushMatch.FEEDBACK_CORRECT
+                m.save()
+                results["confirmed_updated"] += 1
 
-        # Update incorrect matches
-        for mid in incorrect:
-            m = TaskPushMatch.objects.filter(pk=mid, push=push).first()
-            if not m:
-                results["invalid_ids"].append({"type": "incorrect", "id": mid})
-                continue
-            m.feedback = TaskPushMatch.FEEDBACK_INCORRECT
-            m.save()
-            results["incorrect_updated"] += 1
+            # Update incorrect matches
+            for mid in incorrect:
+                m = TaskPushMatch.objects.filter(pk=mid, push=push).first()
+                if not m:
+                    results["invalid_ids"].append({"type": "incorrect", "id": mid})
+                    continue
+                m.feedback = TaskPushMatch.FEEDBACK_INCORRECT
+                m.save()
+                results["incorrect_updated"] += 1
 
-        # Create matches for missed tasks
-        for tid in missed:
-            task = Task.objects.filter(pk=tid).first()
-            if not task or task.board.project_id != (project.id_project if project else None):
-                results["invalid_ids"].append({"type": "missed", "id": tid})
-                continue
+            # Create matches for missed tasks
+            for tid in missed:
+                task = Task.objects.filter(pk=tid).first()
+                if not task or task.board.project_id != (project.id_project if project else None):
+                    results["invalid_ids"].append({"type": "missed", "id": tid})
+                    continue
 
-            # Create a manual match record (if doesn't already exist)
-            existing = TaskPushMatch.objects.filter(task=task, push=push).first()
-            if existing:
-                existing.feedback = TaskPushMatch.FEEDBACK_CORRECT
-                existing.reason = (existing.reason or "") + "; user_labeled_missed"
-                existing.model_name = existing.model_name or "manual"
-                existing.save()
-            else:
-                TaskPushMatch.objects.create(
-                    task=task,
-                    push=push,
-                    coverage=TaskPushMatch.COVERAGE_FULL,
-                    reason="user_labeled_missed",
-                    code_snippet=None,
-                    similarity=None,
-                    model_name="manual",
-                    feedback=TaskPushMatch.FEEDBACK_CORRECT,
-                )
-                results["missed_created"] += 1
+                # Create a manual match record (if doesn't already exist)
+                existing = TaskPushMatch.objects.filter(task=task, push=push).first()
+                if existing:
+                    existing.feedback = TaskPushMatch.FEEDBACK_CORRECT
+                    existing.reason = (existing.reason or "") + "; user_labeled_missed"
+                    existing.model_name = existing.model_name or "manual"
+                    existing.save()
+                else:
+                    TaskPushMatch.objects.create(
+                        task=task,
+                        push=push,
+                        coverage=TaskPushMatch.COVERAGE_FULL,
+                        reason="user_labeled_missed",
+                        code_snippet=None,
+                        similarity=None,
+                        model_name="manual",
+                        feedback=TaskPushMatch.FEEDBACK_CORRECT,
+                    )
+                    results["missed_created"] += 1
 
         return Response(results)
 
