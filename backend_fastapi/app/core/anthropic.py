@@ -7,7 +7,7 @@ load_dotenv()
 
 _client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY", ""))
 
-_MODEL = "claude-haiku-4-5"
+_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5")
 
 
 def generate_content(prompt: str, model_name: str = _MODEL, json_mode: bool = False) -> str:

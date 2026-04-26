@@ -72,6 +72,22 @@ def _content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def invalidate_story_embedding(story_id: int) -> None:
+    """Remove a single story's embedding from the in-memory cache.
+
+    Call this if a story was deleted or substantially changed outside this
+    process. It's safe to call even if the id is not present.
+    """
+    with _CACHE_LOCK:
+        STORY_EMBED_CACHE.pop(story_id, None)
+
+
+def clear_story_embedding_cache() -> None:
+    """Clear the entire story embedding cache. Use for testing or maintenance."""
+    with _CACHE_LOCK:
+        STORY_EMBED_CACHE.clear()
+
+
 def match_stories(
     db: Session,
     repo_full_name: str,

@@ -1,5 +1,7 @@
 import os
 import time
+import threading
+from datetime import datetime
 
 import httpx
 import jwt as pyjwt
@@ -11,6 +13,11 @@ _raw_pk = os.getenv("GITHUB_APP_PRIVATE_KEY", "")
 if "\\n" in _raw_pk:
     _raw_pk = _raw_pk.replace("\\n", "\n")
 _GITHUB_APP_PRIVATE_KEY = _raw_pk.strip('"').strip("'")
+
+# Cache installation tokens in-memory to avoid requesting a new token for every push.
+# Map: installation_id -> (token, expires_ts)
+_INSTALL_TOKEN_CACHE: dict[int, tuple[str, float]] = {}
+_TOKEN_LOCK = threading.Lock()
 
 
 def _generate_app_jwt() -> str:
@@ -25,7 +32,18 @@ def _generate_app_jwt() -> str:
 
 
 async def _get_installation_token(installation_id: int) -> str:
-    """Exchange a GitHub App JWT for an installation access token."""
+    """Exchange a GitHub App JWT for an installation access token.
+
+    This function caches tokens in-memory keyed by `installation_id`. The
+    GitHub installation token includes an `expires_at` field which we use to
+    avoid refreshing too often.
+    """
+    now = time.time()
+    with _TOKEN_LOCK:
+        cached = _INSTALL_TOKEN_CACHE.get(installation_id)
+        if cached and cached[1] > now + 30:  # still valid with small margin
+            return cached[0]
+
     app_jwt = _generate_app_jwt()
     url = f"{GITHUB_API_URL}/app/installations/{installation_id}/access_tokens"
     headers = {
@@ -34,8 +52,24 @@ async def _get_installation_token(installation_id: int) -> str:
     }
     async with httpx.AsyncClient(timeout=15) as client:
         response = await client.post(url, headers=headers)
+
     response.raise_for_status()
-    return response.json()["token"]
+    data = response.json()
+    token = data.get("token")
+    expires_at = data.get("expires_at")
+    if expires_at:
+        try:
+            # GitHub returns ISO8601 like '2026-04-25T12:34:56Z'
+            expires_ts = datetime.fromisoformat(expires_at.replace("Z", "+00:00")).timestamp()
+        except Exception:
+            expires_ts = now + 3600
+    else:
+        expires_ts = now + 3600
+
+    with _TOKEN_LOCK:
+        _INSTALL_TOKEN_CACHE[installation_id] = (token, expires_ts)
+
+    return token
 
 
 async def _get_installation_id_for_repo(repo_full_name: str) -> int | None:
