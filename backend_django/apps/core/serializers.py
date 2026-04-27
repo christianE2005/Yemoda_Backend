@@ -21,6 +21,7 @@ from .models import (
     TaskStatus,
     TaskWarning,
     UserAccount,
+    Sprint,
 )
 
 
@@ -274,3 +275,9 @@ class TaskPushMatchSerializer(serializers.ModelSerializer):
             "push_repo",
             "push_commits",
         ]
+
+
+class SprintSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Sprint
+        fields = "__all__"

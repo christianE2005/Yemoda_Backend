@@ -81,8 +81,19 @@ class Project(models.Model):
     name = models.CharField(max_length=150)
     description = models.TextField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+    start_date = models.DateField(null=True, blank=True)
     end_date = models.DateField(null=True, blank=True)
     status = models.CharField(max_length=50, choices=STATUS_CHOICES, default=IN_PROGRESS)
+    # Roadmap configuration
+    ROADMAP_TYPE_SPRINTS = "sprints"
+    ROADMAP_TYPE_CICD = "ci_cd"
+    ROADMAP_TYPE_CHOICES = [
+        (ROADMAP_TYPE_SPRINTS, "Sprints"),
+        (ROADMAP_TYPE_CICD, "CI/CD"),
+    ]
+    roadmap_type = models.CharField(max_length=20, choices=ROADMAP_TYPE_CHOICES, default=ROADMAP_TYPE_SPRINTS)
+    sprint_length_days = models.IntegerField(null=True, blank=True, help_text="Tamaño del sprint en días cuando roadmap_type= sprints")
+    sprint_count = models.IntegerField(null=True, blank=True, help_text="Número total de sprints (opcional). Si no se especifica, se calcula usando sprint_length_days y las fechas")
     created_by = models.ForeignKey(
         UserAccount,
         on_delete=models.SET_NULL,
@@ -222,10 +233,40 @@ class Task(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     due_date = models.DateField(null=True, blank=True)
     completed_at = models.DateTimeField(null=True, blank=True)
+    sprint = models.ForeignKey(
+        "Sprint",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        db_column="id_sprint",
+        related_name="tasks",
+    )
     scrum_number = models.IntegerField(null=True, blank=True)
 
     class Meta:
         db_table = "task"
+
+
+class Sprint(models.Model):
+    id_sprint = models.BigAutoField(primary_key=True)
+    project = models.ForeignKey(
+        Project,
+        on_delete=models.CASCADE,
+        db_column="id_project",
+        related_name="sprints",
+    )
+    number = models.IntegerField()
+    start_date = models.DateField()
+    end_date = models.DateField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "sprint"
+        unique_together = ("project", "number")
+        ordering = ["project_id", "number"]
+
+    def __str__(self):
+        return f"{self.project.name} - Sprint {self.number}"
 
 
 class TaskAssignment(models.Model):

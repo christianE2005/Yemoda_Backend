@@ -21,6 +21,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from .authentication import IsAdminUser
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from rest_framework.decorators import action
 
 from .models import (
     ActivityLog,
@@ -43,6 +44,7 @@ from .models import (
     TaskStatus,
     TaskWarning,
     UserAccount,
+    Sprint,
 )
 from .serializers import (
     ActivityLogSerializer,
@@ -69,6 +71,7 @@ from .serializers import (
     TaskWarningSerializer,
     UserAccountSerializer,
     ExternalConnectionSerializer,
+    SprintSerializer,
 )
 from . import azure_service
 from urllib.parse import urlencode
@@ -320,6 +323,84 @@ class ProjectViewSet(viewsets.ModelViewSet):
     queryset = Project.objects.all()
     serializer_class = ProjectSerializer
 
+    @action(detail=True, methods=["post"])
+    def generate_roadmap(self, request, pk=None):
+        """Generate sprints for the project based on sprint_length_days, start/end dates or explicit sprint_count.
+
+        POST body can include optional overrides: `sprint_length_days`, `start_date`, `end_date`, `sprint_count`.
+        """
+        project = self.get_object()
+        if project.roadmap_type != Project.ROADMAP_TYPE_SPRINTS:
+            return Response({"detail": "Project roadmap_type is not 'sprints'."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Allow overrides from request
+        sprint_length = request.data.get("sprint_length_days") or project.sprint_length_days
+        start_date = None
+        end_date = None
+        if request.data.get("start_date"):
+            try:
+                start_date = datetime.fromisoformat(request.data.get("start_date")).date()
+            except Exception:
+                return Response({"detail": "start_date debe estar en formato ISO YYYY-MM-DD"}, status=status.HTTP_400_BAD_REQUEST)
+        else:
+            start_date = project.start_date or project.created_at.date()
+
+        if request.data.get("end_date"):
+            try:
+                end_date = datetime.fromisoformat(request.data.get("end_date")).date()
+            except Exception:
+                return Response({"detail": "end_date debe estar en formato ISO YYYY-MM-DD"}, status=status.HTTP_400_BAD_REQUEST)
+        else:
+            end_date = project.end_date
+
+        if not end_date:
+            return Response({"detail": "end_date requerido en el proyecto o en el body para generar roadmap."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not sprint_length:
+            return Response({"detail": "sprint_length_days requerido en el proyecto o en el body."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            sprint_length = int(sprint_length)
+            if sprint_length <= 0:
+                raise ValueError()
+        except Exception:
+            return Response({"detail": "sprint_length_days debe ser un entero positivo."}, status=status.HTTP_400_BAD_REQUEST)
+
+        sprint_count = request.data.get("sprint_count") or project.sprint_count
+        if sprint_count:
+            try:
+                sprint_count = int(sprint_count)
+                if sprint_count <= 0:
+                    raise ValueError()
+            except Exception:
+                return Response({"detail": "sprint_count debe ser un entero positivo."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Compute sprint_count if not provided
+        if not sprint_count:
+            total_days = (end_date - start_date).days
+            if total_days <= 0:
+                return Response({"detail": "end_date debe ser posterior a start_date."}, status=status.HTTP_400_BAD_REQUEST)
+            import math
+
+            sprint_count = math.ceil(total_days / sprint_length)
+
+        created = []
+        from django.db import transaction
+        with transaction.atomic():
+            for i in range(int(sprint_count)):
+                s_start = start_date + timedelta(days=i * sprint_length)
+                s_end = s_start + timedelta(days=sprint_length - 1)
+                if s_end > end_date:
+                    s_end = end_date
+                sprint_obj, _ = Sprint.objects.update_or_create(
+                    project=project,
+                    number=i + 1,
+                    defaults={"start_date": s_start, "end_date": s_end},
+                )
+                created.append(sprint_obj)
+
+        return Response(SprintSerializer(created, many=True).data, status=status.HTTP_201_CREATED)
+
     def get_queryset(self):
         user = self.request.user
         return Project.objects.filter(
@@ -547,6 +628,18 @@ class TaskCommentViewSet(viewsets.ModelViewSet):
         if task_id is not None:
             qs = qs.filter(task_id=task_id)
         return qs
+
+
+class SprintViewSet(viewsets.ModelViewSet):
+    queryset = Sprint.objects.all()
+    serializer_class = SprintSerializer
+
+    def get_queryset(self):
+        qs = Sprint.objects.all()
+        project_id = self.request.query_params.get("project")
+        if project_id is not None:
+            qs = qs.filter(project_id=project_id)
+        return qs.order_by("project_id", "number")
 
 
 class TaskAssignmentViewSet(viewsets.ModelViewSet):
