@@ -7,6 +7,7 @@ from .models import (
     Board,
     GithubPushEvent,
     GithubRepo,
+    ExternalConnection,
     Project,
     ProjectMember,
     ProjectRepo,
@@ -165,6 +166,49 @@ class GithubRepoSerializer(serializers.ModelSerializer):
     class Meta:
         model = GithubRepo
         fields = "__all__"
+
+
+class ExternalConnectionSerializer(serializers.ModelSerializer):
+    token = serializers.CharField(write_only=True, required=False, allow_null=True)
+    created_by_username = serializers.CharField(source="created_by.username", read_only=True)
+
+    class Meta:
+        model = ExternalConnection
+        fields = [
+            "id_connection",
+            "project",
+            "provider",
+            "name",
+            "organization",
+            "instance_url",
+            "token",
+            "created_by",
+            "created_by_username",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["id_connection", "created_by", "created_by_username", "created_at", "updated_at"]
+
+    def create(self, validated_data):
+        token = validated_data.pop("token", None)
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        conn = ExternalConnection(**validated_data)
+        if user and hasattr(user, "id_user"):
+            conn.created_by = user
+        if token:
+            conn.set_token(token)
+        conn.save()
+        return conn
+
+    def update(self, instance, validated_data):
+        token = validated_data.pop("token", None)
+        for k, v in validated_data.items():
+            setattr(instance, k, v)
+        if token:
+            instance.set_token(token)
+        instance.save()
+        return instance
 
 
 class RegisterSerializer(serializers.Serializer):

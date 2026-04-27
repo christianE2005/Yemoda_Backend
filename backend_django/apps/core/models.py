@@ -1,4 +1,8 @@
 from django.db import models
+from django.conf import settings
+import hashlib
+import base64
+from cryptography.fernet import Fernet
 
 
 class SystemRole(models.Model):
@@ -218,6 +222,7 @@ class Task(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     due_date = models.DateField(null=True, blank=True)
     completed_at = models.DateTimeField(null=True, blank=True)
+    scrum_number = models.IntegerField(null=True, blank=True)
 
     class Meta:
         db_table = "task"
@@ -333,6 +338,88 @@ class GithubAppInstallation(models.Model):
 
     class Meta:
         db_table = "github_app_installation"
+
+
+class ExternalConnection(models.Model):
+    PROVIDER_AZURE = "azure_devops"
+    PROVIDER_JIRA = "jira"
+    PROVIDER_GITHUB_ISSUES = "github_issues"
+
+    PROVIDER_CHOICES = [
+        (PROVIDER_AZURE, "Azure DevOps"),
+        (PROVIDER_JIRA, "Jira"),
+        (PROVIDER_GITHUB_ISSUES, "GitHub Issues"),
+    ]
+
+    id_connection = models.BigAutoField(primary_key=True)
+    project = models.ForeignKey(
+        Project,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        db_column="id_project",
+        related_name="external_connections",
+    )
+    provider = models.CharField(max_length=50, choices=PROVIDER_CHOICES, default=PROVIDER_AZURE)
+    name = models.CharField(max_length=150)
+    organization = models.CharField(max_length=255, null=True, blank=True)
+    instance_url = models.CharField(max_length=500, null=True, blank=True)
+    encrypted_token = models.TextField(null=True, blank=True)
+    encrypted_refresh_token = models.TextField(null=True, blank=True)
+    token_expires_at = models.DateTimeField(null=True, blank=True)
+    refresh_token_expires_at = models.DateTimeField(null=True, blank=True)
+    created_by = models.ForeignKey(
+        UserAccount,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        db_column="created_by",
+        related_name="external_connections_created",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "external_connection"
+
+    @staticmethod
+    def _fernet_key() -> bytes:
+        # Derive a 32-byte key from Django SECRET_KEY using SHA256 and encode for Fernet
+        secret = (settings.SECRET_KEY or "").encode("utf-8")
+        key = hashlib.sha256(secret).digest()
+        return base64.urlsafe_b64encode(key)
+
+    def set_token(self, token: str) -> None:
+        if not token:
+            self.encrypted_token = None
+            return
+        f = Fernet(self._fernet_key())
+        self.encrypted_token = f.encrypt(token.encode()).decode()
+
+    def get_token(self) -> str | None:
+        if not self.encrypted_token:
+            return None
+        f = Fernet(self._fernet_key())
+        try:
+            return f.decrypt(self.encrypted_token.encode()).decode()
+        except Exception:
+            return None
+
+    def set_refresh_token(self, refresh_token: str) -> None:
+        if not refresh_token:
+            self.encrypted_refresh_token = None
+            return
+        f = Fernet(self._fernet_key())
+        self.encrypted_refresh_token = f.encrypt(refresh_token.encode()).decode()
+
+    def get_refresh_token(self) -> str | None:
+        if not self.encrypted_refresh_token:
+            return None
+        f = Fernet(self._fernet_key())
+        try:
+            return f.decrypt(self.encrypted_refresh_token.encode()).decode()
+        except Exception:
+            return None
 
 
 class GithubPushEvent(models.Model):

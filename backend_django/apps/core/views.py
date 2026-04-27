@@ -29,6 +29,7 @@ from .models import (
     GithubConnection,
     GithubPushEvent,
     GithubRepo,
+    ExternalConnection,
     Project,
     ProjectMember,
     ProjectRepo,
@@ -67,7 +68,11 @@ from .serializers import (
     TaskStatusSerializer,
     TaskWarningSerializer,
     UserAccountSerializer,
+    ExternalConnectionSerializer,
 )
+from . import azure_service
+from urllib.parse import urlencode
+import jwt as pyjwt
 
 GITHUB_API_URL = "https://api.github.com"
 _GITHUB_OAUTH_TOKEN_URL = "https://github.com/login/oauth/access_token"
@@ -1477,6 +1482,201 @@ class GithubRepoContentsView(APIView):
         # Directories first, then files, both alphabetically
         items.sort(key=lambda x: (0 if x["type"] == "dir" else 1, x["name"].lower()))
         return Response({"type": "dir", "path": path or "/", "items": items})
+
+
+class ExternalConnectionCreateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(responses={201: ExternalConnectionSerializer, 400: dict}, tags=["external-connections"])
+    def post(self, request):
+        """Create an ExternalConnection (stores encrypted token)."""
+        serializer = ExternalConnectionSerializer(data=request.data, context={"request": request})
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        conn = serializer.save()
+        return Response(ExternalConnectionSerializer(conn).data, status=status.HTTP_201_CREATED)
+
+    @extend_schema(responses={200: ExternalConnectionSerializer(many=True)}, tags=["external-connections"])
+    def get(self, request):
+        """List ExternalConnections created by the authenticated user."""
+        user = request.user
+        conns = ExternalConnection.objects.filter(created_by=user).order_by("-created_at")
+        return Response(ExternalConnectionSerializer(conns, many=True).data)
+
+
+class ExternalConnectionTestView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(request=dict, responses={200: dict, 400: dict}, tags=["external-connections"])
+    def post(self, request):
+        """Test a PAT for an Azure DevOps organization by listing projects."""
+        organization = (request.data.get("organization") or "").strip()
+        pat = request.data.get("pat")
+        if not organization or not pat:
+            return Response({"detail": "organization and pat are required."}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            projects = azure_service.list_projects(organization, pat)
+        except Exception as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({"ok": True, "projects_count": len(projects), "projects": projects})
+
+
+class AzureOAuthStartView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(responses={200: dict, 400: dict, 403: dict, 500: dict}, tags=["external-connections"])
+    def get(self, request):
+        """Start OAuth flow for Azure DevOps and return authorize URL.
+
+        Query params: `connection_id` (required) — existing ExternalConnection created by user.
+        """
+        connection_id = request.query_params.get("connection_id")
+        if not connection_id:
+            return Response({"detail": "connection_id is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        conn = ExternalConnection.objects.filter(pk=connection_id).first()
+        if not conn:
+            return Response({"detail": "Connection not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        if conn.created_by != request.user:
+            return Response({"detail": "Only the connection owner can start OAuth."}, status=status.HTTP_403_FORBIDDEN)
+
+        client_id = getattr(settings, "AZURE_OAUTH_CLIENT_ID", "")
+        callback = getattr(settings, "AZURE_OAUTH_CALLBACK_URL", "")
+        scopes = getattr(settings, "AZURE_OAUTH_SCOPES", "vso.work")
+        if not client_id or not callback:
+            return Response({"detail": "Azure OAuth client or callback not configured."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        # Build signed state including connection id and user
+        expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+        state_payload = {
+            "nonce": secrets.token_urlsafe(24),
+            "exp": int(expires_at.timestamp()),
+            "purpose": "azure_oauth",
+            "connection_id": conn.id_connection,
+            "user_id": request.user.id_user,
+        }
+        state = pyjwt.encode(state_payload, settings.JWT_SECRET_KEY, algorithm="HS256")
+
+        params = {
+            "client_id": client_id,
+            "response_type": "Assertion",
+            "state": state,
+            "scope": scopes,
+            "redirect_uri": callback,
+        }
+        authorize_url = f"https://app.vssps.visualstudio.com/oauth2/authorize?{urlencode(params)}"
+        return Response({"authorize_url": authorize_url, "state": state})
+
+
+class AzureOAuthCallbackView(APIView):
+    permission_classes = [AllowAny]
+
+    @extend_schema(responses={200: dict, 400: dict, 500: dict}, tags=["external-connections"])
+    def get(self, request):
+        code = request.query_params.get("code")
+        state = request.query_params.get("state")
+        if not code or not state:
+            return HttpResponse("OAuth failed: code/state missing", status=400, content_type="text/plain")
+
+        try:
+            payload = pyjwt.decode(state, settings.JWT_SECRET_KEY, algorithms=["HS256"])
+        except pyjwt.InvalidTokenError:
+            return HttpResponse("OAuth failed: invalid state", status=400, content_type="text/plain")
+
+        if payload.get("purpose") != "azure_oauth":
+            return HttpResponse("OAuth failed: wrong purpose", status=400, content_type="text/plain")
+
+        connection_id = payload.get("connection_id")
+
+        client_secret = getattr(settings, "AZURE_OAUTH_CLIENT_SECRET", "")
+        callback = getattr(settings, "AZURE_OAUTH_CALLBACK_URL", "")
+        if not client_secret or not callback:
+            return HttpResponse("Server not configured for Azure OAuth", status=500, content_type="text/plain")
+
+        # Exchange code for tokens
+        token_url = "https://app.vssps.visualstudio.com/oauth2/token"
+        data = {
+            "client_assertion_type": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+            "client_assertion": client_secret,
+            "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+            "assertion": code,
+            "redirect_uri": callback,
+        }
+        try:
+            resp = requests.post(token_url, data=data, timeout=30)
+            resp.raise_for_status()
+        except Exception as exc:
+            return HttpResponse(f"OAuth token exchange failed: {exc}", status=400, content_type="text/plain")
+
+        token_json = resp.json()
+        access_token = token_json.get("access_token")
+        refresh_token = token_json.get("refresh_token")
+        expires_in = token_json.get("expires_in")
+        if not access_token:
+            return HttpResponse("OAuth failed: no access_token returned", status=400, content_type="text/plain")
+
+        conn = ExternalConnection.objects.filter(pk=connection_id).first()
+        if not conn:
+            return HttpResponse("Connection not found.", status=404, content_type="text/plain")
+
+        conn.set_token(access_token)
+        if refresh_token:
+            conn.set_refresh_token(refresh_token)
+        if expires_in:
+            conn.token_expires_at = datetime.now(timezone.utc) + timedelta(seconds=int(expires_in))
+        conn.save()
+
+        return HttpResponse("Azure OAuth completed successfully.", status=200, content_type="text/plain")
+
+
+class AzureImportWorkitemsView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(request=dict, responses={200: dict, 400: dict, 403: dict, 404: dict}, tags=["external-connections"])
+    def post(self, request, project_id: int):
+        """Fetch work items from Azure DevOps for preview/import into a project.
+
+        Body params: `connection_id` (existing ExternalConnection) OR `pat`+`organization`,
+        plus `azure_project` (the project name in Azure DevOps). Optional `work_item_types` and `limit`.
+        """
+        project = Project.objects.filter(pk=project_id).first()
+        if not project:
+            return Response({"detail": "Proyecto no encontrado."}, status=status.HTTP_404_NOT_FOUND)
+
+        user = request.user
+        is_member = (
+            project.created_by == user or ProjectMember.objects.filter(project=project, user=user).exists()
+        )
+        if not is_member:
+            return Response({"detail": "No tienes acceso a este proyecto."}, status=status.HTTP_403_FORBIDDEN)
+
+        connection_id = request.data.get("connection_id")
+        azure_project = request.data.get("azure_project")
+        work_item_types = request.data.get("work_item_types")
+        limit = int(request.data.get("limit") or 200)
+
+        pat = None
+        organization = None
+        if connection_id:
+            conn = ExternalConnection.objects.filter(pk=connection_id).first()
+            if not conn:
+                return Response({"detail": "Connection not found."}, status=status.HTTP_404_NOT_FOUND)
+            pat = conn.get_token()
+            organization = conn.organization
+        else:
+            pat = request.data.get("pat")
+            organization = request.data.get("organization")
+
+        if not pat or not organization or not azure_project:
+            return Response({"detail": "connection_id or (pat + organization) and azure_project are required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            items = azure_service.fetch_workitems_for_project(organization, azure_project, pat, work_item_types=work_item_types, limit=limit)
+        except Exception as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response({"count": len(items), "items": items})
 
 
 class TaskWarningListView(APIView):
