@@ -368,3 +368,83 @@ Dónde mirar en el código:
 ---
 
 Con esto ya puedes descargar el Excel / CSV, etiquetar localmente y volver a subir etiquetas con `POST /api/pushes/<push_id>/matches/confirm/` o marcar individualmente con `POST /api/matches/<match_id>/feedback/`.
+
+---
+
+## 4) Roadmap (Sprints) — Nueva funcionalidad
+
+Se agregó soporte para generar un roadmap basado en **sprints** y para asignar tareas (HU) a sprints desde la API.
+
+Resumen de cambios backend:
+
+- Modelos / campos nuevos:
+  - `Project`:
+    - `roadmap_type`: `sprints` | `ci_cd` (default `sprints`)
+    - `sprint_length_days`: integer (días)
+    - `sprint_count`: integer (opcional)
+    - `start_date`: date (opcional)
+  - `Sprint` (nuevo modelo): `id_sprint` (PK), `project` (FK), `number`, `start_date`, `end_date` — tabla `sprint`.
+  - `Task`:
+    - `sprint` FK a `Sprint` (campo `id_sprint`)
+    - `scrum_number` (entero opcional)
+
+- Migraciones agregadas:
+  - [backend_django/apps/core/migrations/0025_add_scrum_number.py](backend_django/apps/core/migrations/0025_add_scrum_number.py)
+  - [backend_django/apps/core/migrations/0026_add_roadmap_and_sprint.py](backend_django/apps/core/migrations/0026_add_roadmap_and_sprint.py)
+
+Endpoints relevantes y uso:
+
+- Generar roadmap (crear sprints):
+  - `POST /api/projects/<project_id>/generate_roadmap/`
+  - Body opcional:
+    - `sprint_length_days`: int (sobrescribe valor del proyecto)
+    - `start_date`: `YYYY-MM-DD` (opcional, por defecto `project.start_date` o `created_at`)
+    - `end_date`: `YYYY-MM-DD` (requerido si `project.end_date` no está seteado)
+    - `sprint_count`: int (opcional — si no se especifica, se calcula automáticamente)
+  - Respuesta: lista JSON con los sprints creados.
+  - Ejemplo:
+    ```json
+    POST /api/projects/12/generate_roadmap/
+    { "sprint_length_days": 14, "start_date": "2026-05-01", "end_date": "2026-09-01" }
+    ```
+
+- Sprints CRUD:
+  - `/api/sprints/` — GET, POST, PUT, PATCH, DELETE
+  - Filtrado: `GET /api/sprints/?project=<project_id>` devuelve sprints del proyecto.
+  - Cada sprint JSON contiene: `id_sprint`, `project`, `number`, `start_date`, `end_date`, `created_at`.
+
+- Asignar / mover HU (tareas) en el roadmap:
+  - `PATCH /api/tasks/<task_id>/`
+  - Payload: `{ "sprint": <id_sprint> }` para mover la HU al sprint indicado.
+  - Al listar tareas (`GET /api/tasks/?project=<id>`), cada tarea incluye `sprint` (id o `null`) y `scrum_number`.
+
+Notas de uso (frontend):
+
+- Flujo sugerido:
+  1. En el formulario de creación/edición de proyecto, pedir `roadmap_type`. Si `sprints`, solicitar `sprint_length_days` (en días) y `end_date` (o permitirlo luego).
+  2. Llamar `POST /api/projects/<id>/generate_roadmap/` para generar sprints.
+  3. Mostrar sprints en una vista timeline (obtener `/api/sprints/?project=<id>`).
+  4. Mostrar HU en el timeline (obtener `/api/tasks/?project=<id>` y filtrar por `sprint`).
+  5. Al arrastrar/mover una HU en la UI, hacer `PATCH /api/tasks/<id>/` con `sprint: <id_sprint>`.
+
+- Consideraciones:
+  - `generate_roadmap` calcula `sprint_count = ceil(total_days / sprint_length_days)` si no se provee `sprint_count`.
+  - El API requiere autenticación Bearer (igual que el resto de endpoints protegidos).
+  - Validar en frontend que `end_date` > `start_date`.
+
+Comandos para migraciones (en `backend_django`):
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+python manage.py makemigrations core   # opcional (ya se crearon manualmente 0025/0026)
+python manage.py migrate
+```
+
+Dónde mirar en el código:
+
+- Modelos y campos: [backend_django/apps/core/models.py](backend_django/apps/core/models.py#L1-L400)
+- Serializador de `Sprint`: [backend_django/apps/core/serializers.py](backend_django/apps/core/serializers.py#L1-L200)
+- Endpoint `generate_roadmap` (acción en `ProjectViewSet`): [backend_django/apps/core/views.py](backend_django/apps/core/views.py#L1-L400)
+- `SprintViewSet` y rutas: registrado en [backend_django/config/urls.py](backend_django/config/urls.py#L1-L200)
+- Migraciones: ver links arriba.
+
