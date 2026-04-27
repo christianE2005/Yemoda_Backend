@@ -22,6 +22,9 @@ from .models import (
     TaskWarning,
     UserAccount,
     Sprint,
+    DevOpsConnection,
+    DevOpsSubscription,
+    DevOpsWebhookEvent,
 )
 
 
@@ -281,3 +284,24 @@ class SprintSerializer(serializers.ModelSerializer):
     class Meta:
         model = Sprint
         fields = "__all__"
+
+
+class DevOpsConnectionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = DevOpsConnection
+        fields = "__all__"
+        read_only_fields = ["id_connection", "created_at", "updated_at", "user"]
+
+
+class DevOpsSubscriptionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = DevOpsSubscription
+        fields = "__all__"
+        read_only_fields = ["id_subscription", "created_at"]
+
+
+class DevOpsWebhookEventSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = DevOpsWebhookEvent
+        fields = "__all__"
+        read_only_fields = ["id_event", "received_at"]

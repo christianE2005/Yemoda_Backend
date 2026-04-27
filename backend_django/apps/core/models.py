@@ -381,6 +381,62 @@ class GithubAppInstallation(models.Model):
         db_table = "github_app_installation"
 
 
+class DevOpsConnection(models.Model):
+    id_connection = models.BigAutoField(primary_key=True)
+    user = models.OneToOneField(
+        UserAccount,
+        on_delete=models.CASCADE,
+        db_column="id_user",
+        related_name="devops_connection",
+    )
+    organization = models.CharField(max_length=255, null=True, blank=True)
+    access_token = models.CharField(max_length=255)
+    refresh_token = models.CharField(max_length=255, null=True, blank=True)
+    token_expires_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "devops_connection"
+
+
+class DevOpsSubscription(models.Model):
+    id_subscription = models.BigAutoField(primary_key=True)
+    connection = models.ForeignKey(
+        DevOpsConnection,
+        on_delete=models.CASCADE,
+        db_column="id_connection",
+        related_name="subscriptions",
+    )
+    project_id = models.CharField(max_length=100)
+    subscription_id = models.CharField(max_length=100)
+    event_type = models.CharField(max_length=100, null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "devops_subscription"
+        unique_together = ("connection", "subscription_id")
+
+
+class DevOpsWebhookEvent(models.Model):
+    id_event = models.BigAutoField(primary_key=True)
+    connection = models.ForeignKey(
+        DevOpsConnection,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        db_column="id_connection",
+        related_name="webhook_events",
+    )
+    event_type = models.CharField(max_length=100, null=True, blank=True)
+    payload = models.JSONField(default=dict)
+    received_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "devops_webhook_event"
+        ordering = ["-received_at"]
+
+
 class ExternalConnection(models.Model):
     PROVIDER_AZURE = "azure_devops"
     PROVIDER_JIRA = "jira"

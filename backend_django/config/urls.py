@@ -44,6 +44,10 @@ from apps.core.views import (
     TaskWarningDetailView,
     TaskWarningListView,
     UserAccountViewSet,
+    DevOpsOauthStartView,
+    DevOpsOauthCallbackView,
+    DevOpsStoriesView,
+    DevOpsWebhookReceiver,
 )
 
 router = DefaultRouter()
@@ -79,6 +83,10 @@ urlpatterns = [
     path("api/github/repos/", GithubCreateRepoView.as_view(), name="github-create-repo"),
     path("api/github/connection/status/", GithubConnectionStatusView.as_view(), name="github-connection-status"),
     path("api/github/webhook/push/", GithubPushWebhookView.as_view(), name="github-push-webhook"),
+    path("api/devops/oauth/start/", DevOpsOauthStartView.as_view(), name="devops-oauth-start"),
+    path("api/devops/oauth/callback/", DevOpsOauthCallbackView.as_view(), name="devops-oauth-callback"),
+    path("api/devops/stories/", DevOpsStoriesView.as_view(), name="devops-stories"),
+    path("api/devops/webhooks/<str:user_id>/", DevOpsWebhookReceiver.as_view(), name="devops-webhook"),
     path("api/github/pushes/", GithubPushListView.as_view(), name="github-push-list"),
     path("api/github/commits/diff/", GithubCommitDiffView.as_view(), name="github-commit-diff"),
     path("api/github/contents/", GithubRepoContentsView.as_view(), name="github-repo-contents"),

@@ -45,6 +45,9 @@ from .models import (
     TaskWarning,
     UserAccount,
     Sprint,
+    DevOpsConnection,
+    DevOpsSubscription,
+    DevOpsWebhookEvent,
 )
 from .serializers import (
     ActivityLogSerializer,
@@ -72,8 +75,12 @@ from .serializers import (
     UserAccountSerializer,
     ExternalConnectionSerializer,
     SprintSerializer,
+    DevOpsConnectionSerializer,
+    DevOpsSubscriptionSerializer,
+    DevOpsWebhookEventSerializer,
 )
 from . import azure_service
+from . import devops as devops_core
 from urllib.parse import urlencode
 import jwt as pyjwt
 
@@ -1071,6 +1078,110 @@ class GithubAppLinkInstallationView(APIView):
             },
             status=status.HTTP_200_OK,
         )
+
+
+class DevOpsOauthStartView(APIView):
+    permission_classes = [AllowAny]
+
+    @extend_schema(responses={200: dict}, tags=["devops"])
+    def get(self, request):
+        state = _build_signed_oauth_state()
+        authorize_url = devops_core.get_auth_url(state)
+        return Response({"authorize_url": authorize_url, "state": state}, status=status.HTTP_200_OK)
+
+
+class DevOpsOauthCallbackView(APIView):
+    permission_classes = [AllowAny]
+
+    @extend_schema(request={"application/json": {"type": "object", "properties": {"code": {"type": "string"}, "state": {"type": "string"}, "organization": {"type": "string"}}, "required": ["code", "state"]}}, responses={200: dict, 400: dict, 401: dict}, tags=["devops"])
+    def post(self, request):
+        code = request.data.get("code")
+        state = request.data.get("state")
+        organization = request.data.get("organization") or getattr(settings, "AZURE_ORGANIZATION", None)
+
+        if not code or not state:
+            return Response({"detail": "code and state are required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not _validate_signed_oauth_state(state):
+            return Response({"detail": "OAuth state invalido."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            token_resp = devops_core.exchange_code_for_token(code)
+        except Exception as exc:
+            return Response({"detail": "No se pudo intercambiar el código por tokens.", "error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        access_token = token_resp.get("access_token")
+        refresh_token = token_resp.get("refresh_token")
+        expires_in = token_resp.get("expires_in")
+
+        token_user = _user_from_bearer_token(request)
+        if not token_user:
+            return Response({"detail": "Authorization Bearer requerido para vincular DevOps al usuario actual."}, status=status.HTTP_401_UNAUTHORIZED)
+
+        conn, _ = DevOpsConnection.objects.update_or_create(
+            user=token_user,
+            defaults={
+                "organization": organization,
+                "access_token": access_token,
+                "refresh_token": refresh_token,
+                "token_expires_at": (datetime.now(timezone.utc) + timedelta(seconds=int(expires_in))) if expires_in else None,
+            },
+        )
+
+        created_subs = []
+        try:
+            client = devops_core.DevOpsClient(access_token, organization)
+            projects = client.get_projects()
+        except Exception:
+            projects = []
+
+        for project in projects:
+            project_id = project.get("id")
+            try:
+                subs = devops_core.register_webhooks(access_token, organization, project_id, str(token_user.id_user))
+            except Exception:
+                subs = []
+            for sid in subs:
+                sub_obj, created = DevOpsSubscription.objects.get_or_create(
+                    connection=conn, subscription_id=str(sid), defaults={"project_id": str(project_id)}
+                )
+                created_subs.append(sub_obj)
+
+        return Response({"connection_id": conn.id_connection, "subscriptions_registered": len(created_subs)}, status=status.HTTP_200_OK)
+
+
+class DevOpsStoriesView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(responses={200: dict, 404: dict}, tags=["devops"])
+    def get(self, request):
+        conn = DevOpsConnection.objects.filter(user=request.user).first()
+        if not conn:
+            return Response({"detail": "No DevOps connection found for user."}, status=status.HTTP_404_NOT_FOUND)
+        try:
+            client = devops_core.DevOpsClient(conn.access_token, conn.organization or getattr(settings, "AZURE_ORGANIZATION", ""))
+            stories = client.get_all_user_stories()
+        except Exception as exc:
+            return Response({"detail": "Error fetching stories.", "error": str(exc)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return Response(stories, status=status.HTTP_200_OK)
+
+
+class DevOpsWebhookReceiver(APIView):
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    @extend_schema(responses={200: dict, 401: dict}, tags=["devops"])
+    def post(self, request, user_id: str):
+        secret = request.headers.get("X-Secret", "")
+        if not devops_core.validate_webhook_secret(secret):
+            return Response({"detail": "Invalid secret"}, status=status.HTTP_401_UNAUTHORIZED)
+
+        body = request.data
+        event_type = body.get("eventType") or body.get("eventType")
+        conn = DevOpsConnection.objects.filter(user__id_user=user_id).first()
+        DevOpsWebhookEvent.objects.create(connection=conn, event_type=event_type, payload=body)
+
+        return Response({"status": "ok"}, status=status.HTTP_200_OK)
 
 
 class GithubCreateRepoView(APIView):
