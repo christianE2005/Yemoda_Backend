@@ -3,15 +3,19 @@ from django.contrib import admin
 from .models import (
     ActivityLog,
     Board,
+    BoardColumn,
     GithubAppInstallation,
     GithubConnection,
     GithubPushEvent,
     GithubRepo,
+    Milestone,
     Project,
     ProjectMember,
     ProjectRepo,
     Role,
+    Sprint,
     SystemRole,
+    Tag,
     Task,
     TaskAssignment,
     TaskComment,
@@ -29,6 +33,10 @@ admin.site.register(ProjectRepo)
 admin.site.register(Role)
 admin.site.register(ProjectMember)
 admin.site.register(Board)
+admin.site.register(BoardColumn)
+admin.site.register(Sprint)
+admin.site.register(Milestone)
+admin.site.register(Tag)
 admin.site.register(TaskStatus)
 admin.site.register(TaskPriority)
 admin.site.register(Task)

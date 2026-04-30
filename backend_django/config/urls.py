@@ -5,6 +5,7 @@ from rest_framework.routers import DefaultRouter
 
 from apps.core.views import (
     ActivityLogViewSet,
+    BoardColumnViewSet,
     BoardViewSet,
     GithubAppDebugView,
     GithubAppInstallStartView,
@@ -19,6 +20,7 @@ from apps.core.views import (
     GithubRepoContentsView,
     HealthCheckView,
     LoginView,
+    MilestoneViewSet,
     ProjectMembersView,
     ProjectMemberViewSet,
     ProjectRepoDetailView,
@@ -26,7 +28,9 @@ from apps.core.views import (
     ProjectViewSet,
     RefreshView,
     RoleViewSet,
+    SprintViewSet,
     SystemRoleViewSet,
+    TagViewSet,
     TaskAssignmentViewSet,
     TaskCommentViewSet,
     TaskHistoryView,
@@ -45,6 +49,10 @@ router.register(r"roles", RoleViewSet)
 router.register(r"system-roles", SystemRoleViewSet)
 router.register(r"project-members", ProjectMemberViewSet)
 router.register(r"boards", BoardViewSet)
+router.register(r"board-columns", BoardColumnViewSet)
+router.register(r"sprints", SprintViewSet)
+router.register(r"milestones", MilestoneViewSet)
+router.register(r"tags", TagViewSet)
 router.register(r"task-statuses", TaskStatusViewSet)
 router.register(r"task-priorities", TaskPriorityViewSet)
 router.register(r"tasks", TaskViewSet)

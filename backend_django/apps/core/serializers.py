@@ -5,13 +5,17 @@ from drf_spectacular.utils import extend_schema_field
 from .models import (
     ActivityLog,
     Board,
+    BoardColumn,
     GithubPushEvent,
     GithubRepo,
+    Milestone,
     Project,
     ProjectMember,
     ProjectRepo,
     Role,
+    Sprint,
     SystemRole,
+    Tag,
     Task,
     TaskAssignment,
     TaskComment,
@@ -83,6 +87,30 @@ class ProjectMemberSerializer(serializers.ModelSerializer):
 class BoardSerializer(serializers.ModelSerializer):
     class Meta:
         model = Board
+        fields = "__all__"
+
+
+class BoardColumnSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = BoardColumn
+        fields = "__all__"
+
+
+class SprintSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Sprint
+        fields = "__all__"
+
+
+class MilestoneSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Milestone
+        fields = "__all__"
+
+
+class TagSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Tag
         fields = "__all__"
 
 

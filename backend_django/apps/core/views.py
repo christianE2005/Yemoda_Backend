@@ -23,15 +23,19 @@ from rest_framework.views import APIView
 from .models import (
     ActivityLog,
     Board,
+    BoardColumn,
     GithubAppInstallation,
     GithubConnection,
     GithubPushEvent,
     GithubRepo,
+    Milestone,
     Project,
     ProjectMember,
     ProjectRepo,
     Role,
+    Sprint,
     SystemRole,
+    Tag,
     Task,
     TaskAssignment,
     TaskComment,
@@ -43,6 +47,7 @@ from .models import (
 )
 from .serializers import (
     ActivityLogSerializer,
+    BoardColumnSerializer,
     BoardSerializer,
     GithubAppLinkInstallationSerializer,
     GithubCreateRepoSerializer,
@@ -50,13 +55,16 @@ from .serializers import (
     GithubPushEventSerializer,
     GithubRepoSerializer,
     LoginSerializer,
+    MilestoneSerializer,
     ProjectMemberSerializer,
     ProjectRepoSerializer,
     ProjectSerializer,
     RefreshSerializer,
     RegisterSerializer,
     RoleSerializer,
+    SprintSerializer,
     SystemRoleSerializer,
+    TagSerializer,
     TaskAssignmentSerializer,
     TaskCommentSerializer,
     TaskPrioritySerializer,
@@ -496,6 +504,61 @@ class BoardViewSet(viewsets.ModelViewSet):
         return qs
 
 
+class BoardColumnViewSet(viewsets.ModelViewSet):
+    queryset = BoardColumn.objects.all()
+    serializer_class = BoardColumnSerializer
+
+    def get_queryset(self):
+        """Filter columns by ?board= query param when provided."""
+        qs = BoardColumn.objects.all()
+        board_id = self.request.query_params.get('board')
+        if board_id is not None:
+            qs = qs.filter(board_id=board_id)
+        return qs
+
+
+class SprintViewSet(viewsets.ModelViewSet):
+    queryset = Sprint.objects.all()
+    serializer_class = SprintSerializer
+
+    def get_queryset(self):
+        """Filter sprints by ?project= or ?status= query params."""
+        qs = Sprint.objects.all()
+        project_id = self.request.query_params.get('project')
+        sprint_status = self.request.query_params.get('status')
+        if project_id is not None:
+            qs = qs.filter(project_id=project_id)
+        if sprint_status is not None:
+            qs = qs.filter(status=sprint_status)
+        return qs
+
+
+class MilestoneViewSet(viewsets.ModelViewSet):
+    queryset = Milestone.objects.all()
+    serializer_class = MilestoneSerializer
+
+    def get_queryset(self):
+        """Filter milestones by ?project= query param."""
+        qs = Milestone.objects.all()
+        project_id = self.request.query_params.get('project')
+        if project_id is not None:
+            qs = qs.filter(project_id=project_id)
+        return qs
+
+
+class TagViewSet(viewsets.ModelViewSet):
+    queryset = Tag.objects.all()
+    serializer_class = TagSerializer
+
+    def get_queryset(self):
+        """Filter tags by ?project= query param."""
+        qs = Tag.objects.all()
+        project_id = self.request.query_params.get('project')
+        if project_id is not None:
+            qs = qs.filter(project_id=project_id)
+        return qs
+
+
 class TaskStatusViewSet(viewsets.ModelViewSet):
     queryset = TaskStatus.objects.all()
     serializer_class = TaskStatusSerializer
@@ -511,20 +574,40 @@ class TaskViewSet(viewsets.ModelViewSet):
     serializer_class = TaskSerializer
 
     def get_queryset(self):
-        """Tasks of projects the user belongs to. Optional filters: ?board= ?project="""
+        """
+        Tasks of projects the user belongs to.
+        Filters: ?project= ?sprint= ?board_column= ?milestone= ?backlog=true (sprint=NULL)
+        """
         user = self.request.user
         user_project_ids = Project.objects.filter(
             Q(members__user=user) | Q(created_by=user)
         ).values_list('id_project', flat=True)
-        qs = Task.objects.filter(board__project_id__in=user_project_ids)
-
-        board_id = self.request.query_params.get('board')
-        if board_id is not None:
-            qs = qs.filter(board_id=board_id)
+        qs = Task.objects.filter(project_id__in=user_project_ids)
 
         project_id = self.request.query_params.get('project')
         if project_id is not None:
-            qs = qs.filter(board__project_id=project_id)
+            qs = qs.filter(project_id=project_id)
+
+        sprint_id = self.request.query_params.get('sprint')
+        if sprint_id is not None:
+            qs = qs.filter(sprint_id=sprint_id)
+
+        board_column_id = self.request.query_params.get('board_column')
+        if board_column_id is not None:
+            qs = qs.filter(board_column_id=board_column_id)
+
+        milestone_id = self.request.query_params.get('milestone')
+        if milestone_id is not None:
+            qs = qs.filter(milestone_id=milestone_id)
+
+        # ?backlog=true returns only tasks with no sprint assigned (backlog)
+        backlog = self.request.query_params.get('backlog')
+        if backlog is not None and backlog.lower() == 'true':
+            qs = qs.filter(sprint__isnull=True)
+
+        tag_id = self.request.query_params.get('tag')
+        if tag_id is not None:
+            qs = qs.filter(tags__id_tag=tag_id)
 
         return qs.distinct()
 
@@ -1490,8 +1573,7 @@ class TaskWarningListView(APIView):
             Q(created_by=user) | Q(members__user=user)
         ).distinct().values_list("id_project", flat=True)
 
-        user_board_ids = Board.objects.filter(project_id__in=user_project_ids).values_list("id_board", flat=True)
-        qs = TaskWarning.objects.select_related("task").filter(task__board_id__in=user_board_ids)
+        qs = TaskWarning.objects.select_related("task").filter(task__project_id__in=user_project_ids)
 
         task_id = request.query_params.get("task_id")
         warn_status = request.query_params.get("status")
@@ -1502,8 +1584,7 @@ class TaskWarningListView(APIView):
         if warn_status:
             qs = qs.filter(status=warn_status)
         if project_id:
-            project_board_ids = Board.objects.filter(project_id=project_id).values_list("id_board", flat=True)
-            qs = qs.filter(task__board_id__in=project_board_ids)
+            qs = qs.filter(task__project_id=project_id)
 
         serializer = TaskWarningSerializer(qs[:100], many=True)
         return Response(serializer.data)
@@ -1513,11 +1594,11 @@ class TaskWarningDetailView(APIView):
     @extend_schema(responses={204: None, 403: dict, 404: dict}, tags=["warnings"])
     def delete(self, request, warning_id: int):
         """Elimina un warning. Solo miembros del proyecto al que pertenece la tarea pueden borrarlo."""
-        warning = TaskWarning.objects.select_related("task__board__project").filter(pk=warning_id).first()
+        warning = TaskWarning.objects.select_related("task__project").filter(pk=warning_id).first()
         if not warning:
             return Response({"detail": "Warning no encontrado."}, status=status.HTTP_404_NOT_FOUND)
 
-        project = warning.task.board.project
+        project = warning.task.project
         user = request.user
         is_member = (
             project.created_by == user

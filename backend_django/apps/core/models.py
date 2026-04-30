@@ -163,6 +163,95 @@ class Board(models.Model):
         db_table = "board"
 
 
+class BoardColumn(models.Model):
+    id_column = models.BigAutoField(primary_key=True)
+    board = models.ForeignKey(
+        Board,
+        on_delete=models.CASCADE,
+        db_column="id_board",
+        related_name="columns",
+    )
+    name = models.CharField(max_length=100)
+    order = models.PositiveIntegerField(default=0)
+    is_final = models.BooleanField(default=False)
+
+    class Meta:
+        db_table = "board_column"
+        ordering = ["order"]
+
+    def __str__(self):
+        return f"{self.board.name} — {self.name}"
+
+
+class Sprint(models.Model):
+    PLANNED = "planned"
+    ACTIVE = "active"
+    CLOSED = "closed"
+
+    STATUS_CHOICES = [
+        (PLANNED, "Planned"),
+        (ACTIVE, "Active"),
+        (CLOSED, "Closed"),
+    ]
+
+    id_sprint = models.BigAutoField(primary_key=True)
+    project = models.ForeignKey(
+        Project,
+        on_delete=models.CASCADE,
+        db_column="id_project",
+        related_name="sprints",
+    )
+    name = models.CharField(max_length=150)
+    start_date = models.DateField(null=True, blank=True)
+    end_date = models.DateField(null=True, blank=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=PLANNED)
+
+    class Meta:
+        db_table = "sprint"
+
+    def __str__(self):
+        return self.name
+
+
+class Milestone(models.Model):
+    id_milestone = models.BigAutoField(primary_key=True)
+    project = models.ForeignKey(
+        Project,
+        on_delete=models.CASCADE,
+        db_column="id_project",
+        related_name="milestones",
+    )
+    name = models.CharField(max_length=150)
+    description = models.TextField(null=True, blank=True)
+    due_date = models.DateField(null=True, blank=True)
+    is_completed = models.BooleanField(default=False)
+
+    class Meta:
+        db_table = "milestone"
+
+    def __str__(self):
+        return self.name
+
+
+class Tag(models.Model):
+    id_tag = models.BigAutoField(primary_key=True)
+    project = models.ForeignKey(
+        Project,
+        on_delete=models.CASCADE,
+        db_column="id_project",
+        related_name="tags",
+    )
+    name = models.CharField(max_length=100)
+    color = models.CharField(max_length=20, null=True, blank=True)
+
+    class Meta:
+        db_table = "tag"
+        unique_together = ("project", "name")
+
+    def __str__(self):
+        return self.name
+
+
 class TaskStatus(models.Model):
     id_status = models.BigAutoField(primary_key=True)
     name = models.CharField(max_length=50, unique=True)
@@ -183,22 +272,44 @@ class TaskPriority(models.Model):
 
 class Task(models.Model):
     id_task = models.BigAutoField(primary_key=True)
-    board = models.ForeignKey(
-        Board,
+    project = models.ForeignKey(
+        Project,
         on_delete=models.CASCADE,
-        db_column="id_board",
+        db_column="id_project",
         related_name="tasks",
     )
-    title = models.CharField(max_length=200)
-    description = models.TextField(null=True, blank=True)
-    status = models.ForeignKey(
-        TaskStatus,
+    sprint = models.ForeignKey(
+        Sprint,
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        db_column="id_status",
+        db_column="id_sprint",
         related_name="tasks",
     )
+    board_column = models.ForeignKey(
+        BoardColumn,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        db_column="id_column",
+        related_name="tasks",
+    )
+    milestone = models.ForeignKey(
+        Milestone,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        db_column="id_milestone",
+        related_name="tasks",
+    )
+    tags = models.ManyToManyField(
+        Tag,
+        blank=True,
+        related_name="tasks",
+        db_table="task_tag",
+    )
+    title = models.CharField(max_length=200)
+    description = models.TextField(null=True, blank=True)
     priority = models.ForeignKey(
         TaskPriority,
         on_delete=models.SET_NULL,
@@ -221,6 +332,19 @@ class Task(models.Model):
 
     class Meta:
         db_table = "task"
+
+    def save(self, *args, **kwargs):
+        from django.utils import timezone
+        if self.board_column_id is not None:
+            col = BoardColumn.objects.filter(pk=self.board_column_id).first()
+            if col is not None:
+                if col.is_final and not self.completed_at:
+                    self.completed_at = timezone.now()
+                elif not col.is_final:
+                    self.completed_at = None
+        else:
+            self.completed_at = None
+        super().save(*args, **kwargs)
 
 
 class TaskAssignment(models.Model):
