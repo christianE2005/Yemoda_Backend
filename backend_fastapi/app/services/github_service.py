@@ -1,3 +1,4 @@
+import logging
 import os
 import time
 import threading
@@ -7,6 +8,8 @@ import httpx
 import jwt as pyjwt
 
 GITHUB_API_URL = "https://api.github.com"
+
+logger = logging.getLogger(__name__)
 
 _GITHUB_APP_ID = os.getenv("GITHUB_APP_ID", "")
 _raw_pk = os.getenv("GITHUB_APP_PRIVATE_KEY", "")
@@ -107,3 +110,69 @@ async def fetch_push_diff(repo_full_name: str, base_sha: str, head_sha: str, ins
     if response.status_code == 200:
         return response.text
     return ""
+
+
+async def create_github_branch(
+    repo_full_name: str,
+    branch_name: str,
+    base_branch: str = "main",
+    installation_id: int | None = None,
+) -> dict:
+    """Create a new branch on GitHub from *base_branch* and return the API response."""
+    if not installation_id:
+        installation_id = await _get_installation_id_for_repo(repo_full_name)
+    token = await _get_installation_token(installation_id) if installation_id else None
+
+    headers: dict[str, str] = {"Accept": "application/vnd.github+json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        # Resolve the SHA of the base branch
+        ref_url = f"{GITHUB_API_URL}/repos/{repo_full_name}/git/refs/heads/{base_branch}"
+        ref_resp = await client.get(ref_url, headers=headers)
+        ref_resp.raise_for_status()
+        base_sha: str = ref_resp.json()["object"]["sha"]
+
+        # Create the new branch ref
+        create_url = f"{GITHUB_API_URL}/repos/{repo_full_name}/git/refs"
+        create_resp = await client.post(
+            create_url,
+            json={"ref": f"refs/heads/{branch_name}", "sha": base_sha},
+            headers=headers,
+        )
+        create_resp.raise_for_status()
+        return create_resp.json()
+
+
+async def post_commit_comment(
+    repo_full_name: str,
+    commit_sha: str,
+    message: str,
+    installation_id: int | None = None,
+) -> None:
+    """Post a comment on a specific commit via the GitHub API."""
+    if not installation_id:
+        installation_id = await _get_installation_id_for_repo(repo_full_name)
+    token = await _get_installation_token(installation_id) if installation_id else None
+
+    if not token:
+        logger.warning(
+            "No GitHub token available — cannot post commit comment on %s @ %s",
+            repo_full_name, commit_sha,
+        )
+        return
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+    }
+    url = f"{GITHUB_API_URL}/repos/{repo_full_name}/commits/{commit_sha}/comments"
+    async with httpx.AsyncClient(timeout=15) as client:
+        response = await client.post(url, json={"body": message}, headers=headers)
+
+    if response.status_code not in (200, 201):
+        logger.warning(
+            "Failed to post commit comment (%s): %s",
+            response.status_code, response.text,
+        )

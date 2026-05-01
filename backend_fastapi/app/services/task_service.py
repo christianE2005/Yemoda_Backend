@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.models.models import Board, GithubPushEvent, Project, ProjectRepo, Task, TaskComment, TaskPushMatch, TaskStatus, TaskWarning
+from app.models.models import Board, BranchStoryLink, GithubPushEvent, Project, ProjectRepo, Task, TaskComment, TaskPushMatch, TaskStatus, TaskWarning
 
 logger = logging.getLogger(__name__)
 
@@ -140,3 +140,30 @@ def create_or_get_push_event(
     db.commit()
     db.refresh(push_event)
     return push_event
+
+
+# ── Branch-story linking helpers ─────────────────────────────────────────────
+
+def get_task_by_id(db: Session, task_id: int) -> Task | None:
+    return db.query(Task).filter(Task.id_task == task_id).first()
+
+
+def get_branch_link(db: Session, repo_full_name: str, branch_name: str) -> BranchStoryLink | None:
+    """Return the BranchStoryLink for a given repo + branch, or None if not linked."""
+    return (
+        db.query(BranchStoryLink)
+        .filter(
+            func.lower(BranchStoryLink.repo_full_name) == repo_full_name.lower(),
+            BranchStoryLink.branch_name == branch_name,
+        )
+        .first()
+    )
+
+
+def create_branch_link(db: Session, repo_full_name: str, branch_name: str, task_id: int) -> BranchStoryLink:
+    """Persist a branch → story link and return it."""
+    link = BranchStoryLink(repo_full_name=repo_full_name, branch_name=branch_name, id_task=task_id)
+    db.add(link)
+    db.commit()
+    db.refresh(link)
+    return link

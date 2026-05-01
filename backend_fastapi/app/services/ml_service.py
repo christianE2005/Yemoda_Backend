@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 # Configuration via environment (make changable without editing code)
 ML_EMBED_MODEL = os.getenv(
-    "ML_EMBED_MODEL", "flax-sentence-embeddings/st-codesearch-distilroberta-base"
+    "ML_EMBED_MODEL", "jinaai/jina-embeddings-v2-base-code"
 )
 ML_TOP_K = int(os.getenv("ML_TOP_K", "3"))
 ML_MIN_SIM = float(os.getenv("ML_MIN_SIM", "0.55"))

@@ -4,7 +4,7 @@ import sys
 from fastapi import FastAPI
 
 from app.core.database import Base, engine
-from app.routers import webhook, ml
+from app.routers import branches, ml, webhook
 
 logging.basicConfig(
     stream=sys.stdout,
@@ -22,12 +22,20 @@ app = FastAPI(
 
 app.include_router(webhook.router)
 app.include_router(ml.router)
+app.include_router(branches.router)
 
 
 @app.on_event("startup")
 def on_startup() -> None:
     routes = [f"{list(r.methods)} {r.path}" for r in app.routes if hasattr(r, "methods")]
     logger.info("FastAPI startup — registered routes: %s", routes)
+    try:
+        # Auto-create FastAPI-managed tables (e.g. branch_story_link)
+        from app.models.models import BranchStoryLink  # noqa: F401
+        BranchStoryLink.__table__.create(engine, checkfirst=True)
+        logger.info("branch_story_link table ensured")
+    except Exception as exc:
+        logger.warning("Could not create branch_story_link table: %s", exc)
     try:
         from sqlalchemy import text
         with engine.connect() as conn:

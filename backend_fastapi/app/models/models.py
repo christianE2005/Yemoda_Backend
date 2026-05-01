@@ -1,4 +1,4 @@
-from sqlalchemy import JSON, Date, DateTime, ForeignKey, Integer, String, Text, Float, func
+from sqlalchemy import JSON, Date, DateTime, ForeignKey, Integer, String, Text, Float, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -217,3 +217,25 @@ class TaskPushMatch(Base):
     model_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
     feedback: Mapped[str | None] = mapped_column(String(20), nullable=True)
     created_at: Mapped[DateTime] = mapped_column(DateTime, server_default=func.now())
+
+
+class BranchStoryLink(Base):
+    """Maps a GitHub branch to the user story (task) it was created for.
+
+    Created by POST /branches/create. Used by the webhook to skip ML and
+    send the diff directly to LLM acceptance-criteria evaluation.
+    """
+
+    __tablename__ = "branch_story_link"
+
+    id_link: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    repo_full_name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    branch_name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    id_task: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("task.id_task", ondelete="CASCADE"),
+        nullable=False,
+    )
+    created_at: Mapped[DateTime] = mapped_column(DateTime, server_default=func.now())
+
+    __table_args__ = (UniqueConstraint("repo_full_name", "branch_name", name="uq_branch_story_link"),)
