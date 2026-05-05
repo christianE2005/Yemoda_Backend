@@ -127,9 +127,10 @@ El JWT contiene: `user_id`, `email`, `username`, `is_admin`, `system_role_id`.
 
 | Método | Endpoint | Auth | Descripción |
 |--------|----------|------|-------------|
-| POST | `/api/auth/register/` | ❌ | Registro de usuario |
 | POST | `/api/auth/login/` | ❌ | Login — retorna `access_token` y `refresh_token` |
 | POST | `/api/auth/refresh/` | ❌ | Renueva el access token |
+
+> El registro de usuarios lo hace un **Admin** via `POST /api/user-accounts/`.
 
 #### GitHub App
 
@@ -140,6 +141,7 @@ El JWT contiene: `user_id`, `email`, `username`, `is_admin`, `system_role_id`.
 | POST | `/api/github/app/oauth/callback/` | ✅ | Completa OAuth y vincula cuenta GitHub al usuario |
 | POST | `/api/github/app/install/link/` | ✅ | Vincula una instalación GitHub App al usuario |
 | GET | `/api/github/connection/status/` | ✅ | Estado de la conexión GitHub del usuario autenticado |
+| DELETE | `/api/github/connection/status/` | ✅ | Desvincula la cuenta de GitHub del usuario autenticado |
 | GET | `/api/github/repos/` | ✅ | Lista los repos creados por el usuario (persistidos en BD) |
 | POST | `/api/github/repos/` | ✅ | Crea repositorio en GitHub, configura webhook de push y lo persiste |
 | GET | `/api/github/pushes/` | ✅ | Lista push events recibidos (`?project_id=1` o `?repo=owner/repo`) |
@@ -172,6 +174,7 @@ Respuesta archivo:
 | Método | Endpoint | Auth | Descripción |
 |--------|----------|------|-------------|
 | GET | `/api/task-warnings/` | ✅ | Lista warnings generados por el agente de IA |
+| DELETE | `/api/task-warnings/{warning_id}/` | ✅ | Elimina un warning (solo miembros del proyecto) |
 
 ##### Filtros de `/api/task-warnings/`
 
@@ -183,19 +186,54 @@ Respuesta archivo:
 
 #### Recursos principales (CRUD)
 
-| Recurso | Endpoint base | Métodos |
-|---------|--------------|---------|
-| Usuarios | `/api/user-accounts/` | GET, POST, PUT, PATCH, DELETE |
-| Proyectos | `/api/projects/` | GET, POST, PUT, PATCH, DELETE |
-| Roles de proyecto | `/api/roles/` | GET, POST, PUT, PATCH, DELETE |
-| Roles de sistema | `/api/system-roles/` | GET (solo lectura) |
-| Miembros de proyecto | `/api/project-members/` | GET, POST, PUT, PATCH, DELETE |
-| Tableros (Boards) | `/api/boards/` | GET, POST, PUT, PATCH, DELETE |
-| Estados de tarea | `/api/task-statuses/` | GET, POST, PUT, PATCH, DELETE |
-| Prioridades de tarea | `/api/task-priorities/` | GET, POST, PUT, PATCH, DELETE |
-| Tareas | `/api/tasks/` | GET, POST, PUT, PATCH, DELETE |
-| Comentarios de tarea | `/api/task-comments/` | GET, POST, PUT, PATCH, DELETE |
-| Logs de actividad | `/api/activity-logs/` | GET (solo lectura) |
+| Recurso | Endpoint base | Métodos | Filtros |
+|---------|--------------|---------|---------|
+| Usuarios | `/api/user-accounts/` | GET, POST*, PUT, PATCH, DELETE* | — |
+| Proyectos | `/api/projects/` | GET, POST, PUT, PATCH, DELETE | — |
+| Roles de proyecto | `/api/roles/` | GET, POST, PUT, PATCH, DELETE | — |
+| Roles de sistema | `/api/system-roles/` | GET (solo lectura) | — |
+| Miembros de proyecto | `/api/project-members/` | GET, POST, PUT, PATCH, DELETE | `?project=` |
+| Tableros (Boards) | `/api/boards/` | GET, POST, PUT, PATCH, DELETE | `?project=` |
+| Columnas de tablero | `/api/board-columns/` | GET, POST, PUT, PATCH, DELETE | `?board=` |
+| Sprints | `/api/sprints/` | GET, POST, PUT, PATCH, DELETE | `?project=`, `?status=` |
+| Milestones | `/api/milestones/` | GET, POST, PUT, PATCH, DELETE | `?project=` |
+| Tags | `/api/tags/` | GET, POST, PUT, PATCH, DELETE | `?project=` |
+| Estados de tarea | `/api/task-statuses/` | GET, POST, PUT, PATCH, DELETE | — |
+| Prioridades de tarea | `/api/task-priorities/` | GET, POST, PUT, PATCH, DELETE | — |
+| Tareas | `/api/tasks/` | GET, POST, PUT, PATCH, DELETE | `?project=`, `?sprint=`, `?board_column=`, `?milestone=`, `?tag=`, `?backlog=true` |
+| Asignaciones de tarea | `/api/task-assignments/` | GET, POST, PUT, PATCH, DELETE | `?task=`, `?user=` |
+| Comentarios de tarea | `/api/task-comments/` | GET, POST, PUT, PATCH, DELETE | `?task=` |
+| Logs de actividad | `/api/activity-logs/` | GET (solo lectura) | — |
+
+> \* `POST /api/user-accounts/` y `DELETE /api/user-accounts/{id}/` requieren rol **Admin**.
+
+#### Endpoints anidados de proyectos
+
+| Método | Endpoint | Auth | Descripción |
+|--------|----------|------|-------------|
+| GET | `/api/projects/{project_id}/members/` | ✅ | Lista los miembros del proyecto |
+| POST | `/api/projects/{project_id}/members/` | ✅ | Añade un usuario al proyecto (y como colaborador en GitHub si hay repos vinculados) |
+| GET | `/api/projects/{project_id}/repos/` | ✅ | Lista los repositorios vinculados al proyecto |
+| POST | `/api/projects/{project_id}/repos/` | ✅ Creador | Vincula un repositorio existente al proyecto (máximo 4) |
+| DELETE | `/api/projects/{project_id}/repos/{repo_id}/` | ✅ Creador | Desvincula un repositorio del proyecto |
+
+##### Body de `POST /api/projects/{project_id}/members/`
+
+```json
+{ "user_id": 5, "role_id": 2 }
+```
+
+##### Body de `POST /api/projects/{project_id}/repos/`
+
+```json
+{ "repo_full_name": "owner/mi-repo" }
+```
+
+#### Historial de push por tarea
+
+| Método | Endpoint | Auth | Descripción |
+|--------|----------|------|-------------|
+| GET | `/api/tasks/{task_id}/history/` | ✅ | Push matches vinculados a la tarea por el agente de IA, ordenados por fecha desc |
 
 #### Documentación
 
@@ -210,14 +248,21 @@ Respuesta archivo:
 |-------|-----------------------|
 | `system_role` | Roles del sistema: `Admin (id=1)`, `User (id=2)` |
 | `user_account` | Usuarios con FK a `system_role`, `password_hash` |
-| `project` | Proyectos con `github_repo_full_name` para vinculación |
-| `role` | Roles dentro de un proyecto (Admin, Manager, Developer, Viewer) |
+| `project` | Proyectos con `created_by` y estado de ciclo de vida |
+| `role` | Roles dentro de un proyecto (Admin, Manager, Developer, Viewer, Stakeholder) |
 | `project_member` | Relación usuario-proyecto-rol |
+| `project_repo` | Repositorios vinculados a un proyecto (hasta 4 por proyecto) |
 | `board` | Tableros kanban dentro de un proyecto |
+| `board_column` | Columnas personalizadas de un tablero |
+| `sprint` | Sprints de un proyecto con fechas y estado |
+| `milestone` | Milestones/hitos de un proyecto |
+| `tag` | Etiquetas reutilizables por proyecto |
 | `task_status` | Estados: Backlog, To Do, In Progress, Review, Done |
 | `task_priority` | Prioridades: Low, Medium, High, Critical |
-| `task` | Tareas con asignado, creador, estado, prioridad, fecha límite |
+| `task` | Tareas con sprint, columna de tablero, milestone, tags, fecha límite |
+| `task_assignment` | Asignaciones de usuarios a tareas (M2M explícita) |
 | `task_comment` | Comentarios en tareas (también los genera la IA) |
+| `task_push_match` | Relación tarea↔push generada por el agente IA |
 | `activity_log` | Log de acciones por entidad y usuario |
 | `github_connection` | Token OAuth de GitHub del usuario con soporte de refresco |
 | `github_app_installation` | Instalaciones de la GitHub App por organización |
