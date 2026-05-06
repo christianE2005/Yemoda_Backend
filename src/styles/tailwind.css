@@ -1,0 +1,45 @@
+@import 'tailwindcss' source(none);
+@source '../**/*.{js,ts,jsx,tsx}';
+
+@import 'tw-animate-css';
+
+/* Hide scrollbar but keep scroll functionality */
+@utility scrollbar-none {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+/* Themed custom scrollbar */
+@utility scrollbar-app {
+  scrollbar-width: thin;
+  scrollbar-color: var(--primary) var(--surface-secondary);
+
+  &::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  &::-webkit-scrollbar-track {
+    background: var(--surface-secondary);
+    border-radius: 999px;
+  }
+
+  &::-webkit-scrollbar-thumb {
+    background: var(--primary);
+    border-radius: 999px;
+    border: 2px solid var(--surface-secondary);
+  }
+
+  &::-webkit-scrollbar-thumb:hover {
+    background: var(--primary-hover);
+  }
+}
+
+/* Hide browser-native password reveal button (Edge/Chrome) */
+input::-ms-reveal,
+input::-ms-clear {
+  display: none;
+}

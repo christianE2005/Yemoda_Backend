@@ -448,3 +448,18 @@ Dónde mirar en el código:
 - `SprintViewSet` y rutas: registrado en [backend_django/config/urls.py](backend_django/config/urls.py#L1-L200)
 - Migraciones: ver links arriba.
 
+---
+
+## Frontend (React + Vite)
+
+El frontend del proyecto vive en la raíz del monorepo (src/, index.html, package.json).
+Está construido con **React 18 + TypeScript + Vite + Tailwind CSS v4**.
+
+### Levantar localmente
+
+`ash
+npm install
+npm run dev
+`
+
+El frontend se conecta al backend Django configurado en las variables de entorno (ver ackend_django/.env.example).
