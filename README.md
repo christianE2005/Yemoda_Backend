@@ -47,11 +47,13 @@ ABCDH_Technologies/
     │   ├── models/
     │   │   └── models.py
     │   ├── routers/
-    │   │   └── webhook.py
+    │   │   ├── webhook.py
+    │   │   └── predictions.py
     │   └── services/
     │       ├── agent_service.py
     │       ├── github_service.py
-    │       └── task_service.py
+    │       ├── task_service.py
+    │       └── ml_service.py
     ├── requirements.txt
     ├── Procfile
     └── railway.toml
@@ -259,7 +261,7 @@ Respuesta archivo:
 | `tag` | Etiquetas reutilizables por proyecto |
 | `task_status` | Estados: Backlog, To Do, In Progress, Review, Done |
 | `task_priority` | Prioridades: Low, Medium, High, Critical |
-| `task` | Tareas con sprint, columna de tablero, milestone, tags, fecha límite |
+| `task` | Tareas con sprint, columna de tablero, milestone, tags, fecha límite y `scrum_number` (puntos de estimación) |
 | `task_assignment` | Asignaciones de usuarios a tareas (M2M explícita) |
 | `task_comment` | Comentarios en tareas (también los genera la IA) |
 | `task_push_match` | Relación tarea↔push generada por el agente IA |
@@ -307,6 +309,92 @@ Copia `backend_fastapi/.env.example` → `backend_fastapi/.env`.
 |--------|----------|-------------|
 | GET | `/health` | Health check — retorna `{"status": "ok"}` |
 | POST | `/webhook/push/` | Recibe push events de GitHub, valida firma HMAC-SHA256 y ejecuta análisis de IA en background |
+| POST | `/predictions/project-risk/` | Predice si un proyecto va a retrasarse respecto a su deadline |
+| POST | `/predictions/train/` | Reentrena el modelo ML con todos los proyectos completados |
+
+### Módulo de predicción de riesgos (ML)
+
+Usa **ElasticNet** (regularización L1+L2) para predecir si un proyecto se va a atrasar. Maneja muchas features correlacionadas con pocos datos históricos sin hacer overfitting.
+
+#### `POST /predictions/project-risk/`
+
+Body:
+```json
+{ "project_id": 5 }
+```
+
+Respuesta:
+```json
+{
+  "project_id": 5,
+  "at_risk": true,
+  "confidence": 0.74,
+  "predicted_end_date": "2026-06-15",
+  "days_delay_estimate": 12,
+  "model_used": "elasticnet",
+  "features": {
+    "velocity_last_week": 8.0,
+    "velocity_avg": 6.3,
+    "velocity_trend": 0.27,
+    "sprint_consistency": 3.1,
+    "points_remaining": 45.0,
+    "days_remaining": 33.0,
+    "completion_rate": 0.62,
+    "tasks_in_progress": 7.0
+  }
+}
+```
+
+- `confidence` es `null` cuando no hay modelo entrenado (se usa burndown matemático como fallback)
+- `model_used`: `"elasticnet"` o `"rule_based_burndown"` (fallback con < 3 proyectos completados)
+- Mientras `scrum_number` sea `NULL` en las tareas, cada tarea vale **1 punto** (`COALESCE`)
+
+#### `POST /predictions/train/`
+
+Disponible para regenerar el modelo bajo demanda. Requiere al menos **3 proyectos** con `status='closed'` y tareas completadas. El modelo entrenado se persiste en `backend_fastapi/app/ml_models/` con `joblib`.
+| POST | `/predictions/project-risk/` | Predice si un proyecto va a retrasarse respecto a su deadline |
+| POST | `/predictions/train/` | Reentrena el modelo ML con todos los proyectos completados |
+
+### Módulo de predicción de riesgos (ML)
+
+Usa **ElasticNet** (regularización L1+L2) para predecir si un proyecto se va a atrasar. Maneja muchas features correlacionadas con pocos datos históricos sin hacer overfitting.
+
+#### `POST /predictions/project-risk/`
+
+Body:
+```json
+{ "project_id": 5 }
+```
+
+Respuesta:
+```json
+{
+  "project_id": 5,
+  "at_risk": true,
+  "confidence": 0.74,
+  "predicted_end_date": "2026-06-15",
+  "days_delay_estimate": 12,
+  "model_used": "elasticnet",
+  "features": {
+    "velocity_last_week": 8.0,
+    "velocity_avg": 6.3,
+    "velocity_trend": 0.27,
+    "sprint_consistency": 3.1,
+    "points_remaining": 45.0,
+    "days_remaining": 33.0,
+    "completion_rate": 0.62,
+    "tasks_in_progress": 7.0
+  }
+}
+```
+
+- `confidence` es `null` cuando no hay modelo entrenado (se usa burndown matemático)
+- `model_used`: `"elasticnet"` o `"rule_based_burndown"` (fallback con < 3 proyectos completados)
+- Mientras `scrum_number` sea `NULL` en las tareas, cada tarea vale **1 punto** (`COALESCE`)
+
+#### `POST /predictions/train/`
+
+Disponible para regenerar el modelo bajo demanda. Requiere al menos **3 proyectos** con `status='closed'` y tareas completadas. El modelo entrenado se persiste en `backend_fastapi/app/ml_models/` con `joblib`.
 
 ### Flujo del agente de IA
 
