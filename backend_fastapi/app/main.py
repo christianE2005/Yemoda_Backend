@@ -4,7 +4,7 @@ import sys
 from fastapi import FastAPI
 
 from app.core.database import Base, engine
-from app.routers import webhook
+from app.routers import predictions, webhook
 
 logging.basicConfig(
     stream=sys.stdout,
@@ -21,6 +21,7 @@ app = FastAPI(
 )
 
 app.include_router(webhook.router)
+app.include_router(predictions.router)
 
 
 @app.on_event("startup")

@@ -326,6 +326,7 @@ class Task(models.Model):
         db_column="created_by",
         related_name="tasks_created",
     )
+    scrum_number = models.PositiveIntegerField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     due_date = models.DateField(null=True, blank=True)
     completed_at = models.DateTimeField(null=True, blank=True)

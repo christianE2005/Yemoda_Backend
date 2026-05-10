@@ -128,6 +128,7 @@ class Task(Base):
     created_at: Mapped[DateTime] = mapped_column(DateTime, server_default=func.now())
     due_date: Mapped[Date | None] = mapped_column(Date, nullable=True)
     completed_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+    scrum_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class TaskComment(Base):
