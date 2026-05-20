@@ -20,7 +20,7 @@ from app.services.task_service import (
     get_active_tasks,
     get_active_warnings,
     get_project_by_repo,
-    get_review_status,
+    get_review_column,
     move_task_to_review,
     resolve_warning,
 )
@@ -103,8 +103,8 @@ async def _run_push_analysis(payload: dict, db: Session) -> None:
         logger.error("Claude analysis failed: %s", exc)
         return
 
-    review_status = get_review_status(db)
-    review_status_id = review_status.id_status if review_status else None
+    review_column = get_review_column(db, project.id_project)
+    review_column_id = review_column.id_column if review_column else None
 
     for match in analysis.get("matches", []):
         story_id = match.get("story_id")
@@ -112,8 +112,8 @@ async def _run_push_analysis(payload: dict, db: Session) -> None:
         if not task:
             continue
 
-        if review_status_id:
-            move_task_to_review(db, task, review_status_id)
+        if review_column_id:
+            move_task_to_review(db, task, review_column_id)
 
         resolved_ids = match.get("resolved_warning_ids") or []
         task_warns = get_active_warnings(db, story_id)

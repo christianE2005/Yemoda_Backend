@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.models.models import Board, GithubPushEvent, Project, ProjectRepo, Task, TaskComment, TaskPushMatch, TaskStatus, TaskWarning
+from app.models.models import Board, BoardColumn, GithubPushEvent, Project, ProjectRepo, Task, TaskComment, TaskPushMatch, TaskWarning
 
 logger = logging.getLogger(__name__)
 
@@ -22,24 +22,32 @@ def get_project_by_repo(db: Session, repo_full_name: str) -> Project | None:
 
 
 def get_active_tasks(db: Session, project_id: int) -> list[Task]:
-    """Return all tasks for a project that are not yet completed."""
+    """Return all incomplete tasks for a project."""
     return (
         db.query(Task)
-        .join(Board, Task.id_board == Board.id_board)
         .filter(
-            Board.id_project == project_id,
+            Task.id_project == project_id,
             Task.completed_at.is_(None),
         )
         .all()
     )
 
 
-def get_review_status(db: Session) -> TaskStatus | None:
-    return db.query(TaskStatus).filter(TaskStatus.name == "Review").first()
+def get_review_column(db: Session, project_id: int) -> BoardColumn | None:
+    """Find a board column named 'Review' in any board of the project."""
+    return (
+        db.query(BoardColumn)
+        .join(Board, BoardColumn.id_board == Board.id_board)
+        .filter(
+            Board.id_project == project_id,
+            func.lower(BoardColumn.name) == "review",
+        )
+        .first()
+    )
 
 
-def move_task_to_review(db: Session, task: Task, review_status_id: int) -> None:
-    task.id_status = review_status_id
+def move_task_to_review(db: Session, task: Task, review_column_id: int) -> None:
+    task.id_column = review_column_id
     db.commit()
     db.refresh(task)
 

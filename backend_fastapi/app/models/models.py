@@ -88,6 +88,20 @@ class Board(Base):
     created_at: Mapped[DateTime] = mapped_column(DateTime, server_default=func.now())
 
 
+class BoardColumn(Base):
+    __tablename__ = "board_column"
+
+    id_column: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    id_board: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("board.id_board", ondelete="CASCADE"),
+        nullable=False,
+    )
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    is_final: Mapped[bool] = mapped_column(Integer, nullable=False, default=False)
+
+
 class TaskStatus(Base):
     __tablename__ = "task_status"
 
@@ -108,18 +122,22 @@ class Task(Base):
     __tablename__ = "task"
 
     id_task: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
-    id_board: Mapped[int] = mapped_column(
+    id_project: Mapped[int | None] = mapped_column(
         Integer,
-        ForeignKey("board.id_board", ondelete="CASCADE"),
-        nullable=False,
+        ForeignKey("project.id_project", ondelete="CASCADE"),
+        nullable=True,
+    )
+    id_column: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("board_column.id_column", ondelete="SET NULL"),
+        nullable=True,
+    )
+    id_sprint: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
     )
     title: Mapped[str] = mapped_column(String(200), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
-    id_status: Mapped[int | None] = mapped_column(
-        Integer,
-        ForeignKey("task_status.id_status", ondelete="SET NULL"),
-        nullable=True,
-    )
     id_priority: Mapped[int | None] = mapped_column(
         Integer,
         ForeignKey("task_priority.id_priority", ondelete="SET NULL"),
