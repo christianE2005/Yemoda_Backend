@@ -5,6 +5,8 @@ import logging
 import os
 
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request, status
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 from sqlalchemy.orm import Session
 
 from app.core.database import SessionLocal
@@ -26,6 +28,8 @@ from app.services.task_service import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/webhook", tags=["agent-webhook"])
+
+limiter = Limiter(key_func=get_remote_address)
 
 _WEBHOOK_SECRET = os.getenv("GITHUB_APP_WEBHOOK_SECRET", "")
 
@@ -160,6 +164,7 @@ async def _process_push(payload: dict) -> None:
 
 
 @router.post("/push/")
+@limiter.limit("120/minute")
 async def github_push_webhook(
     request: Request,
     background_tasks: BackgroundTasks,

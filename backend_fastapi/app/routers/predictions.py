@@ -1,7 +1,9 @@
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 from sqlalchemy.orm import Session
 
 from app.core.deps import get_db
@@ -10,6 +12,7 @@ from app.services import ml_service
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/predictions", tags=["predictions"])
+limiter = Limiter(key_func=get_remote_address)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -44,7 +47,8 @@ class TrainResponse(BaseModel):
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.post("/project-risk/", response_model=PredictionResponse, status_code=status.HTTP_200_OK)
-def predict_project_risk(body: PredictRequest, db: Session = Depends(get_db)) -> PredictionResponse:
+@limiter.limit("30/minute")
+def predict_project_risk(request: Request, body: PredictRequest, db: Session = Depends(get_db)) -> PredictionResponse:
     """
     Predict whether a project is at risk of missing its deadline.
 
@@ -66,7 +70,8 @@ def predict_project_risk(body: PredictRequest, db: Session = Depends(get_db)) ->
 
 
 @router.post("/train/", response_model=TrainResponse, status_code=status.HTTP_200_OK)
-def trigger_training(db: Session = Depends(get_db)) -> TrainResponse:
+@limiter.limit("5/minute")
+def trigger_training(request: Request, db: Session = Depends(get_db)) -> TrainResponse:
     """
     Trigger a model (re)training run using all completed projects in the DB.
 

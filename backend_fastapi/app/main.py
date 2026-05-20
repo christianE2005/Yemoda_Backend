@@ -2,6 +2,10 @@ import logging
 import sys
 
 from fastapi import FastAPI
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
+from slowapi.util import get_remote_address
 
 from app.core.database import Base, engine
 from app.routers import predictions, webhook
@@ -14,11 +18,17 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
+limiter = Limiter(key_func=get_remote_address, default_limits=["300/minute"])
+
 app = FastAPI(
     title="ABCDH FastAPI",
     description="Backend de análisis e IA — agente de user stories",
     version="1.0.0",
 )
+
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(SlowAPIMiddleware)
 
 app.include_router(webhook.router)
 app.include_router(predictions.router)

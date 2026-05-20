@@ -134,6 +134,26 @@ REST_FRAMEWORK = {
     "DEFAULT_PERMISSION_CLASSES": [
         "rest_framework.permissions.IsAuthenticated",
     ],
+    "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
+    "PAGE_SIZE": 50,
+    "DEFAULT_THROTTLE_CLASSES": [
+        "rest_framework.throttling.AnonRateThrottle",
+        "rest_framework.throttling.UserRateThrottle",
+    ],
+    "DEFAULT_THROTTLE_RATES": {
+        # Global defaults
+        "anon": "30/minute",
+        "user": "300/minute",
+        # Scoped rates for specific endpoints
+        "login": "5/minute",
+        "register": "5/minute",
+        "token_refresh": "10/minute",
+        "change_password": "5/hour",
+        "github_webhook": "120/minute",
+        "github_oauth": "10/minute",
+        "github_repo_create": "10/minute",
+        "github_repo_contents": "60/minute",
+    },
 }
 
 SPECTACULAR_SETTINGS = {

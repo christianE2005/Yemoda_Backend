@@ -27,6 +27,7 @@ from .models import (
 )
 
 
+
 class SystemRoleSerializer(serializers.ModelSerializer):
     class Meta:
         model = SystemRole
@@ -154,6 +155,24 @@ class TaskSerializer(serializers.ModelSerializer):
             for assignment in assignments
         ]
 
+    def validate_story_points(self, value):
+        if value is not None and value < 1:
+            raise serializers.ValidationError("story_points debe ser al menos 1.")
+        return value
+
+    def validate(self, attrs):
+        scrum_number = attrs.get('scrum_number')
+        project = attrs.get('project') or (self.instance.project if self.instance else None)
+        if scrum_number is not None and project is not None:
+            qs = Task.objects.filter(project=project, scrum_number=scrum_number)
+            if self.instance:
+                qs = qs.exclude(pk=self.instance.pk)
+            if qs.exists():
+                raise serializers.ValidationError(
+                    {"scrum_number": "Ya existe una tarea con ese número en este proyecto."}
+                )
+        return attrs
+
 
 class TaskAssignmentSerializer(serializers.ModelSerializer):
     assigned_to_email = serializers.CharField(source="assigned_to.email", read_only=True)
@@ -209,6 +228,11 @@ class LoginSerializer(serializers.Serializer):
 
 class RefreshSerializer(serializers.Serializer):
     refresh_token = serializers.CharField(write_only=True)
+
+
+class ChangePasswordSerializer(serializers.Serializer):
+    current_password = serializers.CharField(write_only=True)
+    new_password = serializers.CharField(write_only=True, min_length=8)
 
 
 class GithubOauthCallbackSerializer(serializers.Serializer):

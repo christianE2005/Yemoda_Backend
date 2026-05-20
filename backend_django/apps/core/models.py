@@ -327,12 +327,20 @@ class Task(models.Model):
         related_name="tasks_created",
     )
     scrum_number = models.PositiveIntegerField(null=True, blank=True)
+    story_points = models.PositiveSmallIntegerField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     due_date = models.DateField(null=True, blank=True)
     completed_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         db_table = "task"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["project", "scrum_number"],
+                condition=models.Q(scrum_number__isnull=False),
+                name="unique_task_scrum_number_per_project",
+            )
+        ]
 
     def save(self, *args, **kwargs):
         from django.utils import timezone

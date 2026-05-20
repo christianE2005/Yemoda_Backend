@@ -18,6 +18,7 @@ from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from .authentication import IsAdminUser
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from .models import (
@@ -49,6 +50,7 @@ from .serializers import (
     ActivityLogSerializer,
     BoardColumnSerializer,
     BoardSerializer,
+    ChangePasswordSerializer,
     GithubAppLinkInstallationSerializer,
     GithubCreateRepoSerializer,
     GithubOauthCallbackSerializer,
@@ -307,13 +309,26 @@ class UserAccountViewSet(viewsets.ModelViewSet):
     queryset = UserAccount.objects.all()
     serializer_class = UserAccountSerializer
 
-    def get_permissions(self):
-        if self.action in ("list", "retrieve"):
-            return [IsAuthenticated()]
-        return [IsAdminUser()]
+    def get_queryset(self):
+        user = self.request.user
+        if user.is_admin:
+            return UserAccount.objects.all()
+        # Non-admins can only access their own account
+        return UserAccount.objects.filter(id_user=user.id_user)
 
-    def perform_create(self, serializer):
-        """Admin creates users with hashed passwords"""
+    def get_permissions(self):
+        if self.action in ('list', 'create', 'destroy'):
+            return [IsAdminUser()]
+        if self.action in ('update', 'partial_update'):
+            # Admin can update anyone; regular users can only update themselves
+            return [IsAuthenticated()]
+        return [IsAuthenticated()]
+
+    def perform_update(self, serializer):
+        user = self.request.user
+        if not user.is_admin and serializer.instance.pk != user.id_user:
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied("Solo puedes editar tu propio perfil.")
         serializer.save()
 
 
@@ -352,8 +367,17 @@ class ProjectViewSet(viewsets.ModelViewSet):
 class RoleViewSet(viewsets.ModelViewSet):
     queryset = Role.objects.all()
     serializer_class = RoleSerializer
-    authentication_classes = []
-    permission_classes = [AllowAny]
+
+    def get_permissions(self):
+        if self.action in ('list', 'retrieve'):
+            authentication_classes = []
+            return [AllowAny()]
+        return [IsAdminUser()]
+
+    def get_authenticators(self):
+        if self.action in ('list', 'retrieve'):
+            return []
+        return super().get_authenticators()
 
 
 class SystemRoleViewSet(viewsets.ReadOnlyModelViewSet):
@@ -496,8 +520,11 @@ class BoardViewSet(viewsets.ModelViewSet):
     serializer_class = BoardSerializer
 
     def get_queryset(self):
-        """Filter boards by ?project= query param when provided."""
-        qs = Board.objects.all()
+        user = self.request.user
+        user_project_ids = Project.objects.filter(
+            Q(members__user=user) | Q(created_by=user)
+        ).values_list('id_project', flat=True)
+        qs = Board.objects.filter(project_id__in=user_project_ids)
         project_id = self.request.query_params.get('project')
         if project_id is not None:
             qs = qs.filter(project_id=project_id)
@@ -509,8 +536,11 @@ class BoardColumnViewSet(viewsets.ModelViewSet):
     serializer_class = BoardColumnSerializer
 
     def get_queryset(self):
-        """Filter columns by ?board= query param when provided."""
-        qs = BoardColumn.objects.all()
+        user = self.request.user
+        user_project_ids = Project.objects.filter(
+            Q(members__user=user) | Q(created_by=user)
+        ).values_list('id_project', flat=True)
+        qs = BoardColumn.objects.filter(board__project_id__in=user_project_ids)
         board_id = self.request.query_params.get('board')
         if board_id is not None:
             qs = qs.filter(board_id=board_id)
@@ -522,8 +552,11 @@ class SprintViewSet(viewsets.ModelViewSet):
     serializer_class = SprintSerializer
 
     def get_queryset(self):
-        """Filter sprints by ?project= or ?status= query params."""
-        qs = Sprint.objects.all()
+        user = self.request.user
+        user_project_ids = Project.objects.filter(
+            Q(members__user=user) | Q(created_by=user)
+        ).values_list('id_project', flat=True)
+        qs = Sprint.objects.filter(project_id__in=user_project_ids)
         project_id = self.request.query_params.get('project')
         sprint_status = self.request.query_params.get('status')
         if project_id is not None:
@@ -538,8 +571,11 @@ class MilestoneViewSet(viewsets.ModelViewSet):
     serializer_class = MilestoneSerializer
 
     def get_queryset(self):
-        """Filter milestones by ?project= query param."""
-        qs = Milestone.objects.all()
+        user = self.request.user
+        user_project_ids = Project.objects.filter(
+            Q(members__user=user) | Q(created_by=user)
+        ).values_list('id_project', flat=True)
+        qs = Milestone.objects.filter(project_id__in=user_project_ids)
         project_id = self.request.query_params.get('project')
         if project_id is not None:
             qs = qs.filter(project_id=project_id)
@@ -551,8 +587,11 @@ class TagViewSet(viewsets.ModelViewSet):
     serializer_class = TagSerializer
 
     def get_queryset(self):
-        """Filter tags by ?project= query param."""
-        qs = Tag.objects.all()
+        user = self.request.user
+        user_project_ids = Project.objects.filter(
+            Q(members__user=user) | Q(created_by=user)
+        ).values_list('id_project', flat=True)
+        qs = Tag.objects.filter(project_id__in=user_project_ids)
         project_id = self.request.query_params.get('project')
         if project_id is not None:
             qs = qs.filter(project_id=project_id)
@@ -563,10 +602,20 @@ class TaskStatusViewSet(viewsets.ModelViewSet):
     queryset = TaskStatus.objects.all()
     serializer_class = TaskStatusSerializer
 
+    def get_permissions(self):
+        if self.action in ('list', 'retrieve'):
+            return [IsAuthenticated()]
+        return [IsAdminUser()]
+
 
 class TaskPriorityViewSet(viewsets.ModelViewSet):
     queryset = TaskPriority.objects.all()
     serializer_class = TaskPrioritySerializer
+
+    def get_permissions(self):
+        if self.action in ('list', 'retrieve'):
+            return [IsAuthenticated()]
+        return [IsAdminUser()]
 
 
 class TaskViewSet(viewsets.ModelViewSet):
@@ -609,7 +658,7 @@ class TaskViewSet(viewsets.ModelViewSet):
         if tag_id is not None:
             qs = qs.filter(tags__id_tag=tag_id)
 
-        return qs.distinct()
+        return qs.distinct().prefetch_related('assignments__assigned_to', 'tags')
 
 
 class TaskCommentViewSet(viewsets.ModelViewSet):
@@ -617,8 +666,11 @@ class TaskCommentViewSet(viewsets.ModelViewSet):
     serializer_class = TaskCommentSerializer
 
     def get_queryset(self):
-        """Filter comments by ?task= query param when provided."""
-        qs = TaskComment.objects.all()
+        user = self.request.user
+        user_project_ids = Project.objects.filter(
+            Q(members__user=user) | Q(created_by=user)
+        ).values_list('id_project', flat=True)
+        qs = TaskComment.objects.filter(task__project_id__in=user_project_ids)
         task_id = self.request.query_params.get('task')
         if task_id is not None:
             qs = qs.filter(task_id=task_id)
@@ -630,16 +682,17 @@ class TaskAssignmentViewSet(viewsets.ModelViewSet):
     serializer_class = TaskAssignmentSerializer
 
     def get_queryset(self):
-        """Filter assignments by ?task= or ?user= query params."""
-        qs = TaskAssignment.objects.all()
+        user = self.request.user
+        user_project_ids = Project.objects.filter(
+            Q(members__user=user) | Q(created_by=user)
+        ).values_list('id_project', flat=True)
+        qs = TaskAssignment.objects.filter(task__project_id__in=user_project_ids)
         task_id = self.request.query_params.get('task')
-        user_id = self.request.query_params.get('user')
-        
+        user_id_param = self.request.query_params.get('user')
         if task_id is not None:
             qs = qs.filter(task_id=task_id)
-        if user_id is not None:
-            qs = qs.filter(assigned_to_id=user_id)
-        
+        if user_id_param is not None:
+            qs = qs.filter(assigned_to_id=user_id_param)
         return qs
 
 
@@ -677,6 +730,8 @@ class ActivityLogViewSet(viewsets.ModelViewSet):
 
 class RegisterView(APIView):
     permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "register"
 
     @extend_schema(
         request=RegisterSerializer,
@@ -712,6 +767,8 @@ class RegisterView(APIView):
 
 class LoginView(APIView):
     permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "login"
 
     @extend_schema(
         request=LoginSerializer,
@@ -736,6 +793,8 @@ class LoginView(APIView):
 
 class RefreshView(APIView):
     permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "token_refresh"
 
     @extend_schema(
         request=RefreshSerializer,
@@ -777,6 +836,30 @@ class RefreshView(APIView):
         )
 
 
+class ChangePasswordView(APIView):
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "change_password"
+
+    @extend_schema(
+        request=ChangePasswordSerializer,
+        responses={200: dict, 400: dict},
+        tags=["auth"],
+    )
+    def post(self, request):
+        serializer = ChangePasswordSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        current_password = serializer.validated_data["current_password"]
+        new_password = serializer.validated_data["new_password"]
+
+        if not check_password(current_password, request.user.password_hash):
+            return Response({"detail": "Contraseña actual incorrecta."}, status=status.HTTP_400_BAD_REQUEST)
+
+        request.user.password_hash = make_password(new_password)
+        request.user.save(update_fields=["password_hash"])
+        return Response({"detail": "Contraseña actualizada correctamente."}, status=status.HTTP_200_OK)
+
+
 class GithubAppInstallStartView(APIView):
     """
     Endpoint reservado para administradores de la organización.
@@ -795,6 +878,8 @@ class GithubAppInstallStartView(APIView):
 
 class GithubAppOauthStartView(APIView):
     permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "github_oauth"
 
     @extend_schema(responses={200: dict, 500: dict}, tags=["github-app"])
     def get(self, request):
@@ -1057,6 +1142,9 @@ class GithubAppLinkInstallationView(APIView):
 
 
 class GithubCreateRepoView(APIView):
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "github_repo_create"
+
     @extend_schema(responses={200: GithubRepoSerializer(many=True)}, tags=["github-app"])
     def get(self, request):
         """
@@ -1272,6 +1360,8 @@ class GithubCreateRepoView(APIView):
 
 class GithubPushWebhookView(APIView):
     permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "github_webhook"
 
     @extend_schema(request=dict, responses={200: dict, 400: dict, 401: dict}, tags=["github-app"])
     def post(self, request):
@@ -1388,6 +1478,9 @@ class GithubPushListView(APIView):
 
 
 class GithubCommitDiffView(APIView):
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "github_repo_contents"
+
     @extend_schema(responses={200: dict, 400: dict}, tags=["github-app"])
     def get(self, request):
         """
@@ -1475,6 +1568,9 @@ class GithubCommitDiffView(APIView):
 
 
 class GithubRepoContentsView(APIView):
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "github_repo_contents"
+
     @extend_schema(responses={200: dict, 400: dict}, tags=["github-app"])
     def get(self, request):
         """
