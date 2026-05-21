@@ -174,6 +174,7 @@ class BoardColumn(models.Model):
     name = models.CharField(max_length=100)
     order = models.PositiveIntegerField(default=0)
     is_final = models.BooleanField(default=False)
+    is_review = models.BooleanField(default=False)
 
     class Meta:
         db_table = "board_column"

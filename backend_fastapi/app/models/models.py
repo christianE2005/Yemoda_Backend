@@ -100,6 +100,7 @@ class BoardColumn(Base):
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     is_final: Mapped[bool] = mapped_column(Integer, nullable=False, default=False)
+    is_review: Mapped[bool] = mapped_column(Integer, nullable=False, default=False)
 
 
 class TaskStatus(Base):
@@ -132,10 +133,7 @@ class Task(Base):
         ForeignKey("board_column.id_column", ondelete="SET NULL"),
         nullable=True,
     )
-    id_sprint: Mapped[int | None] = mapped_column(
-        Integer,
-        nullable=True,
-    )
+    id_sprint: Mapped[int | None] = mapped_column(Integer, nullable=True)
     title: Mapped[str] = mapped_column(String(200), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     id_priority: Mapped[int | None] = mapped_column(

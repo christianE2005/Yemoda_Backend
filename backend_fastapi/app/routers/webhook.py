@@ -139,16 +139,16 @@ async def _run_push_analysis(payload: dict, db: Session) -> None:
         )
         logger.info("TaskPushMatch saved for story %s (push %s).", story_id, push_event.id_push)
 
-        coverage_label = "✅ Completa" if coverage == "full" else "⚠️ Parcial"
+        coverage_label = "Completa" if coverage == "full" else "Parcial"
         lines = [
             "🤖 **Análisis de IA — Push detectado**",
             f"**Cobertura:** {coverage_label}",
             f"**Razón:** {match.get('reason', '')}",
         ]
         if resolved_ids:
-            lines.append(f"\n✅ **Warnings resueltos:** {len(resolved_ids)}")
+            lines.append(f"\n**Warnings resueltos:** {len(resolved_ids)}")
         if new_warnings:
-            lines.append("\n⚠️ **Nuevos warnings:**")
+            lines.append("\n**Nuevos warnings:**")
             lines.extend(f"- {w}" for w in new_warnings)
 
         add_agent_comment(db, story_id, "\n".join(lines))

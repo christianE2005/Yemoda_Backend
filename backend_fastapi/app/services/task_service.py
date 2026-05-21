@@ -34,13 +34,13 @@ def get_active_tasks(db: Session, project_id: int) -> list[Task]:
 
 
 def get_review_column(db: Session, project_id: int) -> BoardColumn | None:
-    """Find a board column named 'Review' in any board of the project."""
+    """Find the board column marked as is_review in any board of the project."""
     return (
         db.query(BoardColumn)
         .join(Board, BoardColumn.id_board == Board.id_board)
         .filter(
             Board.id_project == project_id,
-            func.lower(BoardColumn.name) == "review",
+            BoardColumn.is_review.is_(True),
         )
         .first()
     )

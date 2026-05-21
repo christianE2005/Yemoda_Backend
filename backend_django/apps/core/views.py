@@ -546,6 +546,19 @@ class BoardColumnViewSet(viewsets.ModelViewSet):
             qs = qs.filter(board_id=board_id)
         return qs
 
+    def _enforce_single_review(self, instance):
+        """If this column is marked as review, unset the flag on all others in the same board."""
+        if instance.is_review:
+            BoardColumn.objects.filter(board=instance.board, is_review=True).exclude(pk=instance.pk).update(is_review=False)
+
+    def perform_create(self, serializer):
+        instance = serializer.save()
+        self._enforce_single_review(instance)
+
+    def perform_update(self, serializer):
+        instance = serializer.save()
+        self._enforce_single_review(instance)
+
 
 class SprintViewSet(viewsets.ModelViewSet):
     queryset = Sprint.objects.all()
