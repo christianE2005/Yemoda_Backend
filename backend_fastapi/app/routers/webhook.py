@@ -19,6 +19,7 @@ from app.services.task_service import (
     create_warning,
     get_active_tasks,
     get_active_warnings,
+    get_board_review_settings,
     get_project_by_repo,
     get_review_column,
     move_task_to_review,
@@ -98,7 +99,9 @@ async def _run_push_analysis(payload: dict, db: Session) -> None:
             ]
 
     try:
-        analysis = analyze_push(stories, diff, active_warnings=active_warnings_map)
+        coding_style, review_focus = get_board_review_settings(db, project.id_project)
+        analysis = analyze_push(stories, diff, active_warnings=active_warnings_map, coding_style=coding_style, review_focus=review_focus)
+        logger.info("Analysis complete for project %s (style=%s, focus=%s): %d matches", project.id_project, coding_style, review_focus, len(analysis.get("matches", [])))
     except Exception as exc:
         logger.error("Claude analysis failed: %s", exc)
         return

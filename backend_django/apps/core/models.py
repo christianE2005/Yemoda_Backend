@@ -148,6 +148,19 @@ class ProjectMember(models.Model):
 
 
 class Board(models.Model):
+    CODING_STYLE_CHOICES = [
+        ("standard", "Standard"),
+        ("clean_code", "Clean Code / SOLID"),
+        ("tdd", "Test-Driven Development"),
+        ("security", "Security-First"),
+        ("performance", "Performance & Optimization"),
+    ]
+
+    REVIEW_FOCUS_CHOICES = [
+        ("strict", "Strict — Story & acceptance criteria only"),
+        ("general", "General — Story + code quality suggestions"),
+    ]
+
     id_board = models.BigAutoField(primary_key=True)
     project = models.ForeignKey(
         Project,
@@ -157,6 +170,16 @@ class Board(models.Model):
     )
     name = models.CharField(max_length=150)
     description = models.TextField(null=True, blank=True)
+    coding_style = models.CharField(
+        max_length=20,
+        choices=CODING_STYLE_CHOICES,
+        default="standard",
+    )
+    review_focus = models.CharField(
+        max_length=10,
+        choices=REVIEW_FOCUS_CHOICES,
+        default="general",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

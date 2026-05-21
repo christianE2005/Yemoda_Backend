@@ -21,6 +21,42 @@ def get_project_by_repo(db: Session, repo_full_name: str) -> Project | None:
     return db.query(Project).filter(Project.id_project == project_repo.id_project).first()
 
 
+def get_board_coding_style(db: Session, project_id: int) -> str:
+    """Return the coding_style of the board that has the review column, or 'standard'."""
+    board = (
+        db.query(Board)
+        .join(BoardColumn, BoardColumn.id_board == Board.id_board)
+        .filter(
+            Board.id_project == project_id,
+            BoardColumn.is_review.is_(True),
+        )
+        .first()
+    )
+    if board:
+        return board.coding_style or "standard"
+    # Fallback: first board of the project
+    board = db.query(Board).filter(Board.id_project == project_id).first()
+    return board.coding_style if board else "standard"
+
+
+def get_board_review_settings(db: Session, project_id: int) -> tuple[str, str]:
+    """Return (coding_style, review_focus) for the board with the review column."""
+    board = (
+        db.query(Board)
+        .join(BoardColumn, BoardColumn.id_board == Board.id_board)
+        .filter(
+            Board.id_project == project_id,
+            BoardColumn.is_review.is_(True),
+        )
+        .first()
+    )
+    if not board:
+        board = db.query(Board).filter(Board.id_project == project_id).first()
+    if not board:
+        return "standard", "general"
+    return board.coding_style or "standard", board.review_focus or "general"
+
+
 def get_active_tasks(db: Session, project_id: int) -> list[Task]:
     """Return all incomplete tasks for a project."""
     return (

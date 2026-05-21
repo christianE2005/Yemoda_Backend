@@ -85,6 +85,8 @@ class Board(Base):
     )
     name: Mapped[str] = mapped_column(String(150), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    coding_style: Mapped[str] = mapped_column(String(20), nullable=False, default="standard")
+    review_focus: Mapped[str] = mapped_column(String(10), nullable=False, default="general")
     created_at: Mapped[DateTime] = mapped_column(DateTime, server_default=func.now())
 
 
