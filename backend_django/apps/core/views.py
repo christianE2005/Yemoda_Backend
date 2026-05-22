@@ -1754,6 +1754,528 @@ class TaskHistoryView(APIView):
         return Response(serializer.data)
 
 
+# ── Pull Request / Reviews ────────────────────────────────────────────────────
+
+def _get_user_github_token(user: UserAccount) -> str:
+    """Return a valid OAuth token for the user or raise ValueError."""
+    connection = GithubConnection.objects.filter(user=user).first()
+    if not connection:
+        raise ValueError("No tienes una cuenta de GitHub conectada.")
+    token = _get_valid_github_token(connection)
+    if not token:
+        raise ValueError("Tu conexión de GitHub expiró. Vuelve a conectar tu cuenta.")
+    return token
+
+
+def _installation_token_for_repo(repo_full_name: str) -> str | None:
+    """Return a GitHub App installation token for the given repo's org, or None."""
+    org_login = repo_full_name.split("/")[0]
+    installation = GithubAppInstallation.objects.filter(account_login__iexact=org_login).first()
+    if not installation:
+        return None
+    try:
+        return _installation_access_token(installation.installation_id)
+    except Exception:
+        return None
+
+
+def _pr_token(user: UserAccount, repo_full_name: str) -> tuple[str, bool]:
+    """Return (token, is_app_token) for repo-level GitHub API calls."""
+    app_token = _installation_token_for_repo(repo_full_name)
+    if app_token:
+        return app_token, True
+    user_token = _get_user_github_token(user)  # raises ValueError if not connected
+    return user_token, False
+
+
+class PullRequestListView(APIView):
+    @extend_schema(
+        parameters=[
+            {"name": "tab", "in": "query", "schema": {"type": "string", "enum": ["for_me", "created"]}, "description": "for_me: PRs where the user is reviewer or assignee. created: PRs authored by the user."},
+            {"name": "state", "in": "query", "schema": {"type": "string", "enum": ["open", "closed", "all"]}, "description": "PR state filter (default: open)."},
+            {"name": "project_id", "in": "query", "schema": {"type": "integer"}, "description": "Scope results to repos of a specific project."},
+        ],
+        responses={200: dict},
+        tags=["reviews"],
+        summary="List pull requests associated with the authenticated user",
+    )
+    def get(self, request):
+        tab = (request.query_params.get("tab") or "for_me").strip()
+        state = (request.query_params.get("state") or "open").strip()
+        project_id = request.query_params.get("project_id")
+
+        try:
+            token = _get_user_github_token(request.user)
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        connection = GithubConnection.objects.filter(user=request.user).first()
+        login = connection.github_login
+
+        # Build repo scope qualifier if project_id provided
+        repo_qualifier = ""
+        if project_id:
+            try:
+                project = Project.objects.get(pk=int(project_id))
+                repos = list(
+                    ProjectRepo.objects.filter(project=project).values_list("repo_full_name", flat=True)
+                )
+                if project.github_repo_full_name and project.github_repo_full_name not in repos:
+                    repos.append(project.github_repo_full_name)
+                if repos:
+                    repo_qualifier = " ".join(f"repo:{r}" for r in repos[:8])
+            except (Project.DoesNotExist, ValueError):
+                pass
+
+        if state not in ("open", "closed", "all"):
+            state = "open"
+        state_q = "is:open" if state == "open" else ("is:closed" if state == "closed" else "")
+
+        if tab == "created":
+            queries = [f"type:pr {state_q} author:{login} {repo_qualifier}".strip()]
+        else:
+            # for_me: review-requested + assignee (deduplicated)
+            queries = [
+                f"type:pr {state_q} review-requested:{login} {repo_qualifier}".strip(),
+                f"type:pr {state_q} assignee:{login} {repo_qualifier}".strip(),
+            ]
+
+        headers = _github_headers(token)
+        seen: set[int] = set()
+        prs: list[dict] = []
+
+        for query in queries:
+            resp = requests.get(
+                f"{GITHUB_API_URL}/search/issues",
+                headers=headers,
+                params={"q": query, "per_page": 50, "sort": "updated"},
+                timeout=20,
+            )
+            if resp.status_code >= 400:
+                continue
+            for item in resp.json().get("items", []):
+                if item["id"] in seen:
+                    continue
+                seen.add(item["id"])
+                # repository_url: https://api.github.com/repos/owner/repo
+                repo_api_url = item.get("repository_url", "")
+                repo_full = "/".join(repo_api_url.split("/")[-2:]) if repo_api_url else ""
+                pr_meta = item.get("pull_request", {})
+                prs.append({
+                    "number": item["number"],
+                    "title": item["title"],
+                    "state": item["state"],
+                    "draft": item.get("draft", False),
+                    "repo": repo_full,
+                    "url": item["html_url"],
+                    "author": {
+                        "login": item["user"]["login"],
+                        "avatar_url": item["user"]["avatar_url"],
+                    },
+                    "created_at": item["created_at"],
+                    "updated_at": item["updated_at"],
+                    "comments": item.get("comments", 0),
+                    "labels": [lbl["name"] for lbl in item.get("labels", [])],
+                    "assignees": [
+                        {"login": a["login"], "avatar_url": a["avatar_url"]}
+                        for a in item.get("assignees", [])
+                    ],
+                    "merged_at": pr_meta.get("merged_at"),
+                })
+
+        prs.sort(key=lambda p: p["updated_at"], reverse=True)
+        return Response({"tab": tab, "total_count": len(prs), "prs": prs})
+
+
+class PullRequestDetailView(APIView):
+    @extend_schema(
+        parameters=[
+            {"name": "repo", "in": "query", "required": True, "schema": {"type": "string"}, "description": "owner/repo"},
+            {"name": "pr", "in": "query", "required": True, "schema": {"type": "integer"}, "description": "PR number"},
+        ],
+        responses={200: dict, 400: dict, 404: dict},
+        tags=["reviews"],
+        summary="Get PR details including reviews, comments, and CI checks",
+    )
+    def get(self, request):
+        repo = (request.query_params.get("repo") or "").strip()
+        pr_raw = request.query_params.get("pr")
+        if not repo or not pr_raw:
+            return Response({"detail": "Parámetros 'repo' y 'pr' requeridos."}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            pr_number = int(pr_raw)
+        except (TypeError, ValueError):
+            return Response({"detail": "'pr' debe ser un número entero."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            token, _ = _pr_token(request.user, repo)
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        headers = _github_headers(token)
+        base_url = f"{GITHUB_API_URL}/repos/{repo}"
+
+        pr_resp = requests.get(f"{base_url}/pulls/{pr_number}", headers=headers, timeout=20)
+        if pr_resp.status_code == 404:
+            return Response({"detail": "PR no encontrado."}, status=status.HTTP_404_NOT_FOUND)
+        if pr_resp.status_code >= 400:
+            return Response({"detail": "Error consultando el PR en GitHub."}, status=status.HTTP_400_BAD_REQUEST)
+        pr = pr_resp.json()
+
+        reviews_resp = requests.get(f"{base_url}/pulls/{pr_number}/reviews", headers=headers, timeout=20)
+        reviews = []
+        if reviews_resp.status_code == 200:
+            for r in reviews_resp.json():
+                reviews.append({
+                    "id": r["id"],
+                    "user": {"login": r["user"]["login"], "avatar_url": r["user"]["avatar_url"]},
+                    "state": r["state"],
+                    "body": r.get("body") or "",
+                    "submitted_at": r.get("submitted_at"),
+                    "html_url": r.get("html_url", ""),
+                })
+
+        comments_resp = requests.get(
+            f"{base_url}/issues/{pr_number}/comments",
+            headers=headers,
+            params={"per_page": 100},
+            timeout=20,
+        )
+        comments = []
+        if comments_resp.status_code == 200:
+            for c in comments_resp.json():
+                comments.append({
+                    "id": c["id"],
+                    "user": {"login": c["user"]["login"], "avatar_url": c["user"]["avatar_url"]},
+                    "body": c["body"],
+                    "created_at": c["created_at"],
+                    "updated_at": c["updated_at"],
+                    "html_url": c.get("html_url", ""),
+                })
+
+        head_sha = pr.get("head", {}).get("sha", "")
+        checks = []
+        if head_sha:
+            checks_resp = requests.get(
+                f"{base_url}/commits/{head_sha}/check-runs",
+                headers=headers,
+                params={"per_page": 50},
+                timeout=20,
+            )
+            if checks_resp.status_code == 200:
+                for ch in checks_resp.json().get("check_runs", []):
+                    checks.append({
+                        "name": ch["name"],
+                        "status": ch["status"],
+                        "conclusion": ch.get("conclusion"),
+                        "url": ch.get("html_url", ""),
+                        "started_at": ch.get("started_at"),
+                        "completed_at": ch.get("completed_at"),
+                    })
+
+        return Response({
+            "number": pr["number"],
+            "title": pr["title"],
+            "body": pr.get("body") or "",
+            "state": pr["state"],
+            "draft": pr.get("draft", False),
+            "merged": pr.get("merged", False),
+            "mergeable": pr.get("mergeable"),
+            "repo": repo,
+            "url": pr["html_url"],
+            "author": {
+                "login": pr["user"]["login"],
+                "avatar_url": pr["user"]["avatar_url"],
+            },
+            "head_branch": pr["head"]["ref"],
+            "base_branch": pr["base"]["ref"],
+            "head_sha": head_sha,
+            "created_at": pr["created_at"],
+            "updated_at": pr["updated_at"],
+            "additions": pr.get("additions", 0),
+            "deletions": pr.get("deletions", 0),
+            "changed_files": pr.get("changed_files", 0),
+            "requested_reviewers": [
+                {"login": r["login"], "avatar_url": r["avatar_url"]}
+                for r in pr.get("requested_reviewers", [])
+            ],
+            "assignees": [
+                {"login": a["login"], "avatar_url": a["avatar_url"]}
+                for a in pr.get("assignees", [])
+            ],
+            "labels": [lbl["name"] for lbl in pr.get("labels", [])],
+            "reviews": reviews,
+            "comments": comments,
+            "checks": checks,
+        })
+
+
+class PullRequestFilesView(APIView):
+    @extend_schema(
+        parameters=[
+            {"name": "repo", "in": "query", "required": True, "schema": {"type": "string"}, "description": "owner/repo"},
+            {"name": "pr", "in": "query", "required": True, "schema": {"type": "integer"}, "description": "PR number"},
+        ],
+        responses={200: dict, 400: dict, 404: dict},
+        tags=["reviews"],
+        summary="Get PR changed files with per-file unified diffs",
+    )
+    def get(self, request):
+        repo = (request.query_params.get("repo") or "").strip()
+        pr_raw = request.query_params.get("pr")
+        if not repo or not pr_raw:
+            return Response({"detail": "Parámetros 'repo' y 'pr' requeridos."}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            pr_number = int(pr_raw)
+        except (TypeError, ValueError):
+            return Response({"detail": "'pr' debe ser un número entero."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            token, _ = _pr_token(request.user, repo)
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        resp = requests.get(
+            f"{GITHUB_API_URL}/repos/{repo}/pulls/{pr_number}/files",
+            headers=_github_headers(token),
+            params={"per_page": 100},
+            timeout=30,
+        )
+        if resp.status_code == 404:
+            return Response({"detail": "PR no encontrado."}, status=status.HTTP_404_NOT_FOUND)
+        if resp.status_code >= 400:
+            return Response({"detail": "Error obteniendo archivos del PR."}, status=status.HTTP_400_BAD_REQUEST)
+
+        files = []
+        for f in resp.json():
+            files.append({
+                "filename": f["filename"],
+                "status": f["status"],          # added / modified / removed / renamed
+                "additions": f["additions"],
+                "deletions": f["deletions"],
+                "changes": f["changes"],
+                "patch": f.get("patch") or "",  # unified diff; may be empty for binary files
+                "blob_url": f.get("blob_url") or "",
+                "raw_url": f.get("raw_url") or "",
+                "previous_filename": f.get("previous_filename"),  # present on renames
+            })
+        return Response({"files": files, "total": len(files)})
+
+
+class PullRequestReviewView(APIView):
+    @extend_schema(
+        parameters=[
+            {"name": "repo", "in": "query", "required": True, "schema": {"type": "string"}, "description": "owner/repo"},
+            {"name": "pr", "in": "query", "required": True, "schema": {"type": "integer"}, "description": "PR number"},
+        ],
+        request={"application/json": {
+            "type": "object",
+            "properties": {
+                "event": {"type": "string", "enum": ["APPROVE", "REQUEST_CHANGES", "COMMENT"]},
+                "body": {"type": "string"},
+            },
+            "required": ["event"],
+        }},
+        responses={201: dict, 400: dict, 404: dict},
+        tags=["reviews"],
+        summary="Submit a review on a PR (approve, request changes, or comment)",
+    )
+    def post(self, request):
+        repo = (request.query_params.get("repo") or "").strip()
+        pr_raw = request.query_params.get("pr")
+        if not repo or not pr_raw:
+            return Response({"detail": "Parámetros 'repo' y 'pr' requeridos."}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            pr_number = int(pr_raw)
+        except (TypeError, ValueError):
+            return Response({"detail": "'pr' debe ser un número entero."}, status=status.HTTP_400_BAD_REQUEST)
+
+        event = (request.data.get("event") or "").upper().strip()
+        if event not in ("APPROVE", "REQUEST_CHANGES", "COMMENT"):
+            return Response(
+                {"detail": "'event' debe ser APPROVE, REQUEST_CHANGES o COMMENT."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        body = (request.data.get("body") or "").strip()
+        if event in ("REQUEST_CHANGES", "COMMENT") and not body:
+            return Response(
+                {"detail": f"'body' es requerido para el evento '{event}'."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            token = _get_user_github_token(request.user)
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        payload: dict = {"event": event}
+        if body:
+            payload["body"] = body
+
+        resp = requests.post(
+            f"{GITHUB_API_URL}/repos/{repo}/pulls/{pr_number}/reviews",
+            headers=_github_headers(token),
+            json=payload,
+            timeout=20,
+        )
+        if resp.status_code == 404:
+            return Response({"detail": "PR no encontrado."}, status=status.HTTP_404_NOT_FOUND)
+        if resp.status_code >= 400:
+            return Response(
+                {"detail": "Error enviando el review a GitHub.", "github_response": resp.text},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        review = resp.json()
+        return Response(
+            {
+                "id": review["id"],
+                "state": review["state"],
+                "body": review.get("body") or "",
+                "submitted_at": review.get("submitted_at"),
+                "html_url": review.get("html_url", ""),
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class PullRequestCommentView(APIView):
+    @extend_schema(
+        parameters=[
+            {"name": "repo", "in": "query", "required": True, "schema": {"type": "string"}, "description": "owner/repo"},
+            {"name": "pr", "in": "query", "required": True, "schema": {"type": "integer"}, "description": "PR number"},
+        ],
+        request={"application/json": {
+            "type": "object",
+            "properties": {"body": {"type": "string"}},
+            "required": ["body"],
+        }},
+        responses={201: dict, 400: dict, 404: dict},
+        tags=["reviews"],
+        summary="Post a general comment on a PR",
+    )
+    def post(self, request):
+        repo = (request.query_params.get("repo") or "").strip()
+        pr_raw = request.query_params.get("pr")
+        if not repo or not pr_raw:
+            return Response({"detail": "Parámetros 'repo' y 'pr' requeridos."}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            pr_number = int(pr_raw)
+        except (TypeError, ValueError):
+            return Response({"detail": "'pr' debe ser un número entero."}, status=status.HTTP_400_BAD_REQUEST)
+
+        body = (request.data.get("body") or "").strip()
+        if not body:
+            return Response({"detail": "'body' no puede estar vacío."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            token = _get_user_github_token(request.user)
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        resp = requests.post(
+            f"{GITHUB_API_URL}/repos/{repo}/issues/{pr_number}/comments",
+            headers=_github_headers(token),
+            json={"body": body},
+            timeout=20,
+        )
+        if resp.status_code == 404:
+            return Response({"detail": "PR no encontrado."}, status=status.HTTP_404_NOT_FOUND)
+        if resp.status_code >= 400:
+            return Response(
+                {"detail": "Error publicando el comentario en GitHub.", "github_response": resp.text},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        comment = resp.json()
+        return Response(
+            {
+                "id": comment["id"],
+                "body": comment["body"],
+                "html_url": comment.get("html_url", ""),
+                "created_at": comment["created_at"],
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class TaskPullRequestsView(APIView):
+    @extend_schema(
+        responses={200: dict, 403: dict, 404: dict},
+        tags=["tasks"],
+        summary="List PRs associated with a task (matched by branch name prefix {task_id}-)",
+    )
+    def get(self, request, task_id: int):
+        user = request.user
+        task = Task.objects.select_related("project").filter(pk=task_id).first()
+        if not task:
+            return Response({"detail": "Tarea no encontrada."}, status=status.HTTP_404_NOT_FOUND)
+
+        project = task.project
+        has_access = (
+            project.created_by_id == user.id_user
+            or ProjectMember.objects.filter(project=project, user=user).exists()
+        )
+        if not has_access:
+            return Response({"detail": "No tienes acceso a este proyecto."}, status=status.HTTP_403_FORBIDDEN)
+
+        project_repo = ProjectRepo.objects.filter(project=project).first()
+        repo_full_name = (
+            (project_repo.repo_full_name if project_repo else None)
+            or project.github_repo_full_name
+        )
+        if not repo_full_name:
+            return Response({"task_id": task_id, "prs": []})
+
+        try:
+            token, _ = _pr_token(user, repo_full_name)
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        prefix = f"{task_id}-"
+        prs: list[dict] = []
+
+        for state in ("open", "closed"):
+            resp = requests.get(
+                f"{GITHUB_API_URL}/repos/{repo_full_name}/pulls",
+                headers=_github_headers(token),
+                params={"state": state, "per_page": 100},
+                timeout=20,
+            )
+            if resp.status_code >= 400:
+                continue
+            for pr in resp.json():
+                head_ref = pr.get("head", {}).get("ref", "")
+                if not (head_ref.startswith(prefix) or head_ref == str(task_id)):
+                    continue
+                prs.append({
+                    "number": pr["number"],
+                    "title": pr["title"],
+                    "state": pr["state"],
+                    "draft": pr.get("draft", False),
+                    "merged": pr.get("merged", False),
+                    "url": pr["html_url"],
+                    "author": {
+                        "login": pr["user"]["login"],
+                        "avatar_url": pr["user"]["avatar_url"],
+                    },
+                    "head_branch": head_ref,
+                    "base_branch": pr["base"]["ref"],
+                    "created_at": pr["created_at"],
+                    "updated_at": pr["updated_at"],
+                    "additions": pr.get("additions", 0),
+                    "deletions": pr.get("deletions", 0),
+                    "changed_files": pr.get("changed_files", 0),
+                    "requested_reviewers": [
+                        {"login": r["login"], "avatar_url": r["avatar_url"]}
+                        for r in pr.get("requested_reviewers", [])
+                    ],
+                })
+
+        prs.sort(key=lambda p: p["updated_at"], reverse=True)
+        return Response({"task_id": task_id, "repo": repo_full_name, "prs": prs})
+
+
 class TaskCreateBranchView(APIView):
     @extend_schema(
         request={"application/json": {"type": "object", "properties": {"base_branch": {"type": "string"}}, "required": ["base_branch"]}},
