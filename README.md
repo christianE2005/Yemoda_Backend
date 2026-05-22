@@ -1,21 +1,22 @@
-# ABCDH Technologies Backend
+﻿# ABCDH Technologies — Backend
 
 Monorepo con dos backends en Python para una plataforma de gestión de proyectos estilo Kanban con integración de GitHub y análisis de código con IA.
 
-- **Django**: gestión de usuarios, autenticación JWT, proyectos, tareas y integración con GitHub App.
-- **FastAPI**: agente de IA (Gemini) que analiza push events y vincula cambios a user stories automáticamente.
+- **Django** (`backend_django/`): API principal — usuarios, autenticación JWT, proyectos, tableros, tareas e integración con GitHub App.
+- **FastAPI** (`backend_fastapi/`): agente de IA (Claude) que analiza push events y vincula cambios a user stories automáticamente. Incluye además un módulo de predicción de riesgo de proyectos (ML).
 
 ## Stack tecnológico
 
 | Capa | Tecnología |
 |------|-----------|
-| Backend principal | Django 5 + Django REST Framework |
-| Backend IA | FastAPI + Gemini API |
-| Base de datos | PostgreSQL (Aiven) |
+| Backend principal | Django 5 + Django REST Framework 3.15 |
+| Backend IA | FastAPI 0.111 + Anthropic Claude |
+| Base de datos | PostgreSQL (Aiven) — compartida entre ambos backends |
 | Autenticación | JWT personalizado (Bearer token) |
-| Documentación API | drf-spectacular (Swagger UI) |
-| Integración GitHub | GitHub App (OAuth + Installation tokens) |
-| Deploy | Railway (Procfile + railway.toml) |
+| Documentación API | drf-spectacular (Swagger UI en `/api/docs/`) |
+| Integración GitHub | GitHub App (OAuth + Installation tokens + Webhooks) |
+| ML de riesgo | scikit-learn ElasticNet + joblib |
+| Deploy | Railway (Procfile + railway.toml por backend) |
 
 ## Estructura del monorepo
 
@@ -43,7 +44,7 @@ ABCDH_Technologies/
     │   ├── core/
     │   │   ├── database.py
     │   │   ├── deps.py
-    │   │   └── gemini.py
+    │   │   └── anthropic.py
     │   ├── models/
     │   │   └── models.py
     │   ├── routers/
@@ -61,22 +62,22 @@ ABCDH_Technologies/
 
 ## Requisitos
 
-- Python 3.11+
+- Python 3.12+
 - PostgreSQL (Aiven u otro)
 
 ---
 
 ## 1) Backend Django
 
-Ruta: `backend_django`
+Ruta: `backend_django/`
 
 ### Levantar localmente
 
 ```bash
 cd backend_django
 python -m venv .venv
-.venv\Scripts\activate       # Windows
-# source .venv/bin/activate  # Linux/Mac
+.venv\Scripts\activate        # Windows
+# source .venv/bin/activate   # Linux/Mac
 pip install -r requirements.txt
 python manage.py migrate --fake-initial
 python manage.py runserver 8001
@@ -85,8 +86,6 @@ python manage.py runserver 8001
 Swagger UI: `http://127.0.0.1:8001/api/docs/`
 
 ### Variables de entorno
-
-Copia `backend_django/.env.example` → `backend_django/.env` y llena tus credenciales.
 
 | Variable | Descripción |
 |----------|-------------|
@@ -110,18 +109,22 @@ Copia `backend_django/.env.example` → `backend_django/.env` y llena tus creden
 | `GITHUB_APP_CLIENT_SECRET` | Client Secret de la GitHub App |
 | `GITHUB_APP_OAUTH_CALLBACK_URL` | URL de callback OAuth |
 | `GITHUB_APP_PRIVATE_KEY` | Llave privada RSA de la GitHub App (con saltos de línea reales) |
-| `GITHUB_APP_WEBHOOK_SECRET` | Secret para validar webhooks |
-| `GITHUB_APP_WEBHOOK_TARGET_URL` | URL del FastAPI que recibe los webhooks |
+| `GITHUB_APP_WEBHOOK_SECRET` | Secret para validar webhooks entrantes |
+| `GITHUB_APP_WEBHOOK_TARGET_URL` | URL del FastAPI que recibe los webhooks reenviados |
 
 ### Autenticación
 
-Todas las rutas (excepto registro, login y webhook) requieren:
+Todas las rutas (excepto login y webhook) requieren:
 
 ```
 Authorization: Bearer <access_token>
 ```
 
 El JWT contiene: `user_id`, `email`, `username`, `is_admin`, `system_role_id`.
+
+> El registro de nuevos usuarios lo hace un **Admin** vía `POST /api/user-accounts/`.
+
+---
 
 ### Endpoints Django
 
@@ -130,66 +133,13 @@ El JWT contiene: `user_id`, `email`, `username`, `is_admin`, `system_role_id`.
 | Método | Endpoint | Auth | Descripción |
 |--------|----------|------|-------------|
 | POST | `/api/auth/login/` | ❌ | Login — retorna `access_token` y `refresh_token` |
-| POST | `/api/auth/refresh/` | ❌ | Renueva el access token |
-
-> El registro de usuarios lo hace un **Admin** via `POST /api/user-accounts/`.
-
-#### GitHub App
-
-| Método | Endpoint | Auth | Descripción |
-|--------|----------|------|-------------|
-| GET | `/api/github/app/install/start/` | ✅ Admin | URL para instalar la GitHub App en una org |
-| GET | `/api/github/app/oauth/start/` | ✅ | Inicia flujo OAuth de GitHub — retorna `authorize_url` |
-| POST | `/api/github/app/oauth/callback/` | ✅ | Completa OAuth y vincula cuenta GitHub al usuario |
-| POST | `/api/github/app/install/link/` | ✅ | Vincula una instalación GitHub App al usuario |
-| GET | `/api/github/connection/status/` | ✅ | Estado de la conexión GitHub del usuario autenticado |
-| DELETE | `/api/github/connection/status/` | ✅ | Desvincula la cuenta de GitHub del usuario autenticado |
-| GET | `/api/github/repos/` | ✅ | Lista los repos creados por el usuario (persistidos en BD) |
-| POST | `/api/github/repos/` | ✅ | Crea repositorio en GitHub, configura webhook de push y lo persiste |
-| GET | `/api/github/pushes/` | ✅ | Lista push events recibidos (`?project_id=1` o `?repo=owner/repo`) |
-| GET | `/api/github/commits/diff/` | ✅ | Diff de un commit específico (`?repo=owner/repo&commit=SHA`) |
-| GET | `/api/github/contents/` | ✅ | Navega archivos del repo (`?repo=owner/repo&path=src&ref=main`) |
-| POST | `/api/github/webhook/push/` | ❌ | Receptor de webhooks push (validado por firma HMAC) |
-
-##### Parámetros de `/api/github/contents/`
-
-| Parámetro | Requerido | Descripción |
-|-----------|-----------|-------------|
-| `repo` | ✅ | `owner/nombre-repo` |
-| `path` | ❌ | Ruta dentro del repo (default: raíz) |
-| `ref` | ❌ | Branch, tag o SHA (default: branch principal) |
-
-Respuesta directorio:
-```json
-{ "type": "dir", "path": "src", "items": [
-  { "type": "dir", "name": "components", "path": "src/components" },
-  { "type": "file", "name": "main.py", "path": "src/main.py", "size": 1024 }
-]}
-```
-Respuesta archivo:
-```json
-{ "type": "file", "name": "main.py", "path": "src/main.py", "content": "def hello():..." }
-```
-
-#### Warnings de IA
-
-| Método | Endpoint | Auth | Descripción |
-|--------|----------|------|-------------|
-| GET | `/api/task-warnings/` | ✅ | Lista warnings generados por el agente de IA |
-| DELETE | `/api/task-warnings/{warning_id}/` | ✅ | Elimina un warning (solo miembros del proyecto) |
-
-##### Filtros de `/api/task-warnings/`
-
-| Parámetro | Descripción |
-|-----------|-------------|
-| `task_id` | Warnings de una tarea específica |
-| `status` | `active` o `resolved` |
-| `project_id` | Todos los warnings de un proyecto |
+| POST | `/api/auth/refresh/` | ❌ | Renueva el access token con el refresh token |
+| POST | `/api/auth/change-password/` | ✅ | Cambia la contraseña del usuario autenticado |
 
 #### Recursos principales (CRUD)
 
-| Recurso | Endpoint base | Métodos | Filtros |
-|---------|--------------|---------|---------|
+| Recurso | Endpoint base | Métodos | Filtros disponibles |
+|---------|--------------|---------|---------------------|
 | Usuarios | `/api/user-accounts/` | GET, POST*, PUT, PATCH, DELETE* | — |
 | Proyectos | `/api/projects/` | GET, POST, PUT, PATCH, DELETE | — |
 | Roles de proyecto | `/api/roles/` | GET, POST, PUT, PATCH, DELETE | — |
@@ -214,77 +164,181 @@ Respuesta archivo:
 | Método | Endpoint | Auth | Descripción |
 |--------|----------|------|-------------|
 | GET | `/api/projects/{project_id}/members/` | ✅ | Lista los miembros del proyecto |
-| POST | `/api/projects/{project_id}/members/` | ✅ | Añade un usuario al proyecto (y como colaborador en GitHub si hay repos vinculados) |
+| POST | `/api/projects/{project_id}/members/` | ✅ | Añade usuario al proyecto (también como colaborador en GitHub si hay repos vinculados) |
 | GET | `/api/projects/{project_id}/repos/` | ✅ | Lista los repositorios vinculados al proyecto |
 | POST | `/api/projects/{project_id}/repos/` | ✅ Creador | Vincula un repositorio existente al proyecto (máximo 4) |
 | DELETE | `/api/projects/{project_id}/repos/{repo_id}/` | ✅ Creador | Desvincula un repositorio del proyecto |
 
-##### Body de `POST /api/projects/{project_id}/members/`
-
+Body de `POST /api/projects/{project_id}/members/`:
 ```json
 { "user_id": 5, "role_id": 2 }
 ```
 
-##### Body de `POST /api/projects/{project_id}/repos/`
-
+Body de `POST /api/projects/{project_id}/repos/`:
 ```json
 { "repo_full_name": "owner/mi-repo" }
 ```
 
-#### Historial de push por tarea
+#### GitHub App
 
 | Método | Endpoint | Auth | Descripción |
 |--------|----------|------|-------------|
-| GET | `/api/tasks/{task_id}/history/` | ✅ | Push matches vinculados a la tarea por el agente de IA, ordenados por fecha desc |
+| GET | `/api/github/app/install/start/` | ✅ Admin | Genera la URL de instalación de la GitHub App en una organización |
+| GET | `/api/github/app/oauth/start/` | ✅ | Inicia flujo OAuth — retorna `authorize_url` |
+| POST | `/api/github/app/oauth/callback/` | ✅ | Completa OAuth y vincula la cuenta de GitHub al usuario |
+| POST | `/api/github/app/install/link/` | ✅ | Vincula una instalación de la GitHub App al usuario |
+| GET | `/api/github/connection/status/` | ✅ | Estado de la conexión GitHub del usuario autenticado |
+| DELETE | `/api/github/connection/status/` | ✅ | Desvincula la cuenta de GitHub del usuario autenticado |
+| GET | `/api/github/repos/` | ✅ | Lista los repos creados desde la plataforma (persistidos en BD) |
+| POST | `/api/github/repos/` | ✅ | Crea repositorio en GitHub, configura webhook de push y lo persiste |
+| GET | `/api/github/pushes/` | ✅ | Lista push events recibidos (`?project_id=1` o `?repo=owner/repo`) |
+| GET | `/api/github/commits/diff/` | ✅ | Diff de un commit (`?repo=owner/repo&commit=SHA`) |
+| GET | `/api/github/contents/` | ✅ | Navega archivos del repo (`?repo=owner/repo&path=src&ref=main`) |
+| POST | `/api/github/webhook/push/` | ❌ | Receptor de webhooks push (validado por firma HMAC-SHA256) |
+
+Respuesta de `GET /api/github/contents/` — directorio:
+```json
+{
+  "type": "dir",
+  "path": "src",
+  "items": [
+    { "type": "dir", "name": "components", "path": "src/components" },
+    { "type": "file", "name": "main.py", "path": "src/main.py", "size": 1024 }
+  ]
+}
+```
+
+Respuesta — archivo:
+```json
+{ "type": "file", "name": "main.py", "path": "src/main.py", "content": "def hello():..." }
+```
+
+#### Tareas — Endpoints especiales
+
+| Método | Endpoint | Auth | Descripción |
+|--------|----------|------|-------------|
+| GET | `/api/tasks/{task_id}/history/` | ✅ | Push matches vinculados a la tarea por el agente IA, ordenados por fecha desc |
+| POST | `/api/tasks/{task_id}/branch/` | ✅ | Crea una rama de GitHub para la tarea y retorna el comando `git checkout` |
+
+##### `POST /api/tasks/{task_id}/branch/`
+
+Crea una rama con formato `{task_id}-{slug-del-titulo}` en el repositorio del proyecto usando la GitHub App.
+
+Body:
+```json
+{ "base_branch": "main" }
+```
+
+Respuesta `201`:
+```json
+{
+  "branch_name": "42-fix-login-con-google",
+  "checkout_command": "git fetch origin && git checkout 42-fix-login-con-google"
+}
+```
+
+| Status | Cuándo ocurre |
+|--------|--------------|
+| `201` | Rama creada correctamente |
+| `400` | `base_branch` vacío, rama base no existe, repo no vinculado o GitHub App no instalada |
+| `403` | El usuario no pertenece al proyecto |
+| `404` | Tarea no encontrada |
+| `409` | La rama ya existe en GitHub |
+
+> Cuando alguien hace push a una rama `{task_id}-*`, el agente analiza **únicamente esa tarea** en lugar de todas las del proyecto.
+
+#### Warnings de IA
+
+| Método | Endpoint | Auth | Descripción |
+|--------|----------|------|-------------|
+| GET | `/api/task-warnings/` | ✅ | Lista warnings generados por el agente de IA |
+| DELETE | `/api/task-warnings/{warning_id}/` | ✅ | Elimina un warning (solo miembros del proyecto) |
+
+Filtros de `GET /api/task-warnings/`:
+
+| Parámetro | Descripción |
+|-----------|-------------|
+| `task_id` | Warnings de una tarea específica |
+| `status` | `active` o `resolved` |
+| `project_id` | Todos los warnings de un proyecto |
+
+Cada warning incluye el campo `severity`:
+
+| Valor | Significado |
+|-------|-------------|
+| `"critical"` | Vulnerabilidad de seguridad o riesgo de pérdida de datos |
+| `"warning"` | Requisito faltante o comportamiento roto |
+| `"info"` | Mejora menor u observación opcional |
 
 #### Documentación
 
 | Endpoint | Descripción |
 |----------|-------------|
-| `/api/docs/` | Swagger UI |
+| `/api/docs/` | Swagger UI interactivo |
 | `/api/schema/` | OpenAPI JSON/YAML |
+
+---
 
 ### Modelos de base de datos (Django)
 
-| Tabla | Descripción principal |
-|-------|-----------------------|
+| Tabla | Descripción |
+|-------|-------------|
 | `system_role` | Roles del sistema: `Admin (id=1)`, `User (id=2)` |
-| `user_account` | Usuarios con FK a `system_role`, `password_hash` |
-| `project` | Proyectos con `created_by` y estado de ciclo de vida |
+| `user_account` | Usuarios con FK a `system_role` y `password_hash` |
+| `project` | Proyectos con `created_by`, estado de ciclo de vida y `review_branches` (ramas que activan el agente) |
 | `role` | Roles dentro de un proyecto (Admin, Manager, Developer, Viewer, Stakeholder) |
-| `project_member` | Relación usuario-proyecto-rol |
+| `project_member` | Relación usuario↔proyecto↔rol |
 | `project_repo` | Repositorios vinculados a un proyecto (hasta 4 por proyecto) |
-| `board` | Tableros kanban dentro de un proyecto |
+| `board` | Tableros kanban; incluye `response_language` y `custom_instructions` para configurar el agente IA |
 | `board_column` | Columnas personalizadas de un tablero |
 | `sprint` | Sprints de un proyecto con fechas y estado |
 | `milestone` | Milestones/hitos de un proyecto |
 | `tag` | Etiquetas reutilizables por proyecto |
 | `task_status` | Estados: Backlog, To Do, In Progress, Review, Done |
 | `task_priority` | Prioridades: Low, Medium, High, Critical |
-| `task` | Tareas con sprint, columna de tablero, milestone, tags, fecha límite y `scrum_number` (puntos de estimación) |
+| `task` | Tareas con sprint, columna de tablero, milestone, tags, fecha límite y `scrum_number` (story points) |
 | `task_assignment` | Asignaciones de usuarios a tareas (M2M explícita) |
-| `task_comment` | Comentarios en tareas (también los genera la IA) |
+| `task_comment` | Comentarios en tareas (también los genera la IA automáticamente) |
 | `task_push_match` | Relación tarea↔push generada por el agente IA |
 | `activity_log` | Log de acciones por entidad y usuario |
 | `github_connection` | Token OAuth de GitHub del usuario con soporte de refresco |
 | `github_app_installation` | Instalaciones de la GitHub App por organización |
 | `github_repo` | Repositorios creados desde la app (persistidos para listado) |
 | `github_push_event` | Historial de push events recibidos con commits |
-| `task_warning` | Warnings activos/resueltos generados por el agente de IA |
+| `task_warning` | Warnings activos/resueltos generados por el agente IA; incluye campo `severity` (`critical`, `warning`, `info`) |
+
+#### Campos de configuración del agente en `board`
+
+| Campo | Tipo | Default | Descripción |
+|-------|------|---------|-------------|
+| `response_language` | `"es"` \| `"en"` | `"es"` | Idioma en el que el agente redacta análisis y comentarios |
+| `custom_instructions` | texto libre \| `null` | `null` | Instrucciones personalizadas que el agente seguirá (ej. "Este proyecto usa Flutter") |
+| `coding_style` | string | `"standard"` | Estilo de código esperado |
+| `review_focus` | `"general"` \| `"strict"` | `"general"` | Nivel de exigencia del análisis |
+| `tech_stack` | string | `"mixed"` | Stack tecnológico del proyecto |
+| `naming_convention` | string | `"default"` | Convención de nombres del código |
+
+#### Campo `review_branches` en `project`
+
+| Campo | Tipo | Default | Descripción |
+|-------|------|---------|-------------|
+| `review_branches` | string | `""` | Ramas separadas por coma (ej. `"main,develop"`) que activan el agente. Vacío = analiza todas |
+
+> Las ramas con formato `{task_id}-*` siempre se analizan, independientemente de `review_branches`.
 
 ---
 
 ## 2) Backend FastAPI
 
-Ruta: `backend_fastapi`
+Ruta: `backend_fastapi/`
 
 ### Levantar localmente
 
 ```bash
 cd backend_fastapi
 python -m venv .venv
-.venv\Scripts\activate       # Windows
-# source .venv/bin/activate  # Linux/Mac
+.venv\Scripts\activate        # Windows
+# source .venv/bin/activate   # Linux/Mac
 pip install -r requirements.txt
 uvicorn app.main:app --reload --port 8002
 ```
@@ -293,15 +347,13 @@ Docs: `http://127.0.0.1:8002/docs`
 
 ### Variables de entorno
 
-Copia `backend_fastapi/.env.example` → `backend_fastapi/.env`.
-
 | Variable | Descripción |
 |----------|-------------|
 | `FASTAPI_DATABASE_URL` | URL completa de PostgreSQL (`postgresql+psycopg2://...`) |
-| `GEMINI_API_KEY` | API key de Google Gemini |
+| `ANTHROPIC_API_KEY` | API key de Anthropic (Claude) |
 | `GITHUB_APP_ID` | ID de la GitHub App (mismo que Django) |
 | `GITHUB_APP_PRIVATE_KEY` | Llave privada RSA de la GitHub App |
-| `GITHUB_APP_WEBHOOK_SECRET` | Secret para validar firmas de webhooks |
+| `GITHUB_APP_WEBHOOK_SECRET` | Secret para validar firmas HMAC-SHA256 de webhooks |
 
 ### Endpoints FastAPI
 
@@ -312,9 +364,50 @@ Copia `backend_fastapi/.env.example` → `backend_fastapi/.env`.
 | POST | `/predictions/project-risk/` | Predice si un proyecto va a retrasarse respecto a su deadline |
 | POST | `/predictions/train/` | Reentrena el modelo ML con todos los proyectos completados |
 
+---
+
+### Agente de IA — Flujo completo
+
+El agente analiza cada push recibido y vincula los cambios de código a las user stories activas del proyecto.
+
+```
+1. GitHub envía push event → POST /webhook/push/
+2. FastAPI valida firma HMAC-SHA256 con GITHUB_APP_WEBHOOK_SECRET
+3. Busca el proyecto en BD por repo_full_name
+4. Aplica filtro de ramas (review_branches):
+   - Rama con formato {task_id}-*  → analiza solo esa tarea (modo enfocado)
+   - review_branches configurado   → omite ramas no incluidas en la lista
+   - review_branches vacío         → analiza todas las ramas
+5. En background: obtiene el diff del push vía GitHub App installation token
+6. Consulta tareas activas + warnings activos del proyecto
+7. Lee configuración del tablero: coding_style, review_focus, tech_stack,
+   naming_convention, response_language, custom_instructions
+8. Envía a Claude: diff + user stories + warnings activos + configuración del tablero
+9. Claude retorna matches: { story_id, coverage, reason, new_warnings[], resolved_warning_ids[] }
+   - new_warnings incluye { message, severity: "critical" | "warning" | "info" }
+10. Por cada match detectado:
+    - Mueve la tarea al estado "En revisión"
+    - Crea TaskWarning nuevos con su severidad correspondiente
+    - Marca como resolved los warnings que Claude identificó como solucionados
+    - Agrega comentario automático en la tarea con el análisis completo
+```
+
+#### Configuración del análisis por tablero
+
+| Parámetro | Efecto en el agente |
+|-----------|---------------------|
+| `response_language` | El agente responde en español (`"es"`) o inglés (`"en"`) |
+| `custom_instructions` | Reglas adicionales del proyecto inyectadas en el prompt |
+| `review_focus` | `"strict"` activa un prompt más exigente; `"general"` es más permisivo |
+| `coding_style` | Ajusta las instrucciones de estilo del prompt |
+| `tech_stack` | Incluye contexto tecnológico en el prompt |
+| `naming_convention` | Instrucciones sobre convenciones de nombres esperadas |
+
+---
+
 ### Módulo de predicción de riesgos (ML)
 
-Usa **ElasticNet** (regularización L1+L2) para predecir si un proyecto se va a atrasar. Maneja muchas features correlacionadas con pocos datos históricos sin hacer overfitting.
+Usa **ElasticNet** (regularización L1+L2) para predecir si un proyecto se va a atrasar respecto a su deadline. Maneja features correlacionadas con pocos datos históricos sin overfitting.
 
 #### `POST /predictions/project-risk/`
 
@@ -345,88 +438,37 @@ Respuesta:
 }
 ```
 
-- `confidence` es `null` cuando no hay modelo entrenado (se usa burndown matemático como fallback)
-- `model_used`: `"elasticnet"` o `"rule_based_burndown"` (fallback con < 3 proyectos completados)
-- Mientras `scrum_number` sea `NULL` en las tareas, cada tarea vale **1 punto** (`COALESCE`)
+| Campo | Descripción |
+|-------|-------------|
+| `at_risk` | `true` si el proyecto tiene riesgo de atraso |
+| `confidence` | Confianza del modelo (0–1). `null` si no hay modelo entrenado (usa burndown matemático) |
+| `model_used` | `"elasticnet"` o `"rule_based_burndown"` (fallback con < 3 proyectos completados) |
+| `days_delay_estimate` | Días estimados de retraso (0 si está a tiempo) |
+
+> Mientras `scrum_number` sea `NULL` en las tareas, cada tarea vale **1 punto** (`COALESCE`).
 
 #### `POST /predictions/train/`
 
-Disponible para regenerar el modelo bajo demanda. Requiere al menos **3 proyectos** con `status='closed'` y tareas completadas. El modelo entrenado se persiste en `backend_fastapi/app/ml_models/` con `joblib`.
-| POST | `/predictions/project-risk/` | Predice si un proyecto va a retrasarse respecto a su deadline |
-| POST | `/predictions/train/` | Reentrena el modelo ML con todos los proyectos completados |
-
-### Módulo de predicción de riesgos (ML)
-
-Usa **ElasticNet** (regularización L1+L2) para predecir si un proyecto se va a atrasar. Maneja muchas features correlacionadas con pocos datos históricos sin hacer overfitting.
-
-#### `POST /predictions/project-risk/`
-
-Body:
-```json
-{ "project_id": 5 }
-```
-
-Respuesta:
-```json
-{
-  "project_id": 5,
-  "at_risk": true,
-  "confidence": 0.74,
-  "predicted_end_date": "2026-06-15",
-  "days_delay_estimate": 12,
-  "model_used": "elasticnet",
-  "features": {
-    "velocity_last_week": 8.0,
-    "velocity_avg": 6.3,
-    "velocity_trend": 0.27,
-    "sprint_consistency": 3.1,
-    "points_remaining": 45.0,
-    "days_remaining": 33.0,
-    "completion_rate": 0.62,
-    "tasks_in_progress": 7.0
-  }
-}
-```
-
-- `confidence` es `null` cuando no hay modelo entrenado (se usa burndown matemático)
-- `model_used`: `"elasticnet"` o `"rule_based_burndown"` (fallback con < 3 proyectos completados)
-- Mientras `scrum_number` sea `NULL` en las tareas, cada tarea vale **1 punto** (`COALESCE`)
-
-#### `POST /predictions/train/`
-
-Disponible para regenerar el modelo bajo demanda. Requiere al menos **3 proyectos** con `status='closed'` y tareas completadas. El modelo entrenado se persiste en `backend_fastapi/app/ml_models/` con `joblib`.
-
-### Flujo del agente de IA
-
-1. GitHub envía un push event a `/webhook/push/`
-2. FastAPI valida la firma con `GITHUB_APP_WEBHOOK_SECRET`
-3. En background: obtiene el diff del commit via GitHub App installation token
-4. Consulta las tareas activas del proyecto vinculado por `github_repo_full_name`
-5. Carga los **warnings activos** de cada tarea y los incluye en el prompt
-6. Envía el diff + user stories + warnings a Gemini para análisis
-7. Para tareas detectadas: mueve el estado a **Review**
-8. **Warnings nuevos**: si el código es parcial, crea `TaskWarning` con `status=active`
-9. **Warnings resueltos**: si el nuevo código soluciona un warning previo, lo marca como `resolved`
-10. Agrega un comentario automático en la tarea con el análisis completo
+Reentrena el modelo bajo demanda. Requiere al menos **3 proyectos** con `status='closed'` y tareas completadas. El modelo se persiste en `backend_fastapi/app/ml_models/` con `joblib`.
 
 ---
 
 ## Notas de despliegue (Railway)
 
-- Cada backend tiene su propio `Procfile` y `railway.toml`
-- La llave privada de GitHub App (`GITHUB_APP_PRIVATE_KEY`) debe pegarse **con saltos de línea reales** en Railway, no con `\n` literales
+- Cada backend tiene su propio `Procfile` y `railway.toml` para deploys independientes
+- `GITHUB_APP_PRIVATE_KEY` debe pegarse con **saltos de línea reales** en Railway (no `\n` literales)
 - `CORS_ALLOWED_ORIGINS` no debe terminar en `/`
-- `GITHUB_APP_WEBHOOK_TARGET_URL` debe apuntar a la URL de FastAPI en Railway
+- `GITHUB_APP_WEBHOOK_TARGET_URL` debe apuntar a la URL del FastAPI en Railway
 
 ## Notas de migraciones
 
 - Si la BD ya tiene tablas preexistentes: `python manage.py migrate --fake-initial`
 - Las migraciones usan `RunSQL` con `IF NOT EXISTS` para ser idempotentes en producción
-- En Aiven, `DB_NAME` debe ser el nombre real de la base (`defaultdb`), no el nombre del proyecto
+- En Aiven, `DB_NAME` debe ser el nombre real de la base (normalmente `defaultdb`), no el nombre del proyecto Railway
 
 ## Seguridad
 
-- No subir `.env` al repositorio (está en `.gitignore`)
+- No subir `.env` al repositorio (en `.gitignore`)
 - Usar secretos distintos para `DJANGO_SECRET_KEY` y `JWT_SECRET_KEY`
 - El endpoint de instalación de GitHub App (`/api/github/app/install/start/`) requiere rol **Admin** (`system_role_id=1`)
-- Los webhooks de GitHub se validan con firma HMAC-SHA256
+- Los webhooks de GitHub se validan con firma HMAC-SHA256 tanto en Django como en FastAPI

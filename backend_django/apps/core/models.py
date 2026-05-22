@@ -88,6 +88,12 @@ class Project(models.Model):
         related_name="projects_created",
     )
     github_repo_full_name = models.CharField(max_length=255, null=True, blank=True, db_index=True)
+    review_branches = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        help_text="Comma-separated branch names to trigger AI review (e.g. main,develop). Leave empty to analyze all branches.",
+    )
 
     class Meta:
         db_table = "project"

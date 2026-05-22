@@ -2,7 +2,9 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
 import json
+import re
 import secrets
+import unicodedata
 from urllib.parse import urlencode
 
 import jwt
@@ -78,6 +80,14 @@ from .serializers import (
 )
 
 GITHUB_API_URL = "https://api.github.com"
+
+
+def _slugify(text: str) -> str:
+    """Convert text to a URL-friendly slug for branch names."""
+    text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
+    text = text.lower()
+    text = re.sub(r"[^a-z0-9]+", "-", text)
+    return text.strip("-")[:50].rstrip("-")
 _GITHUB_OAUTH_TOKEN_URL = "https://github.com/login/oauth/access_token"
 
 
@@ -1742,6 +1752,104 @@ class TaskHistoryView(APIView):
         )
         serializer = TaskPushMatchSerializer(matches, many=True)
         return Response(serializer.data)
+
+
+class TaskCreateBranchView(APIView):
+    @extend_schema(
+        request={"application/json": {"type": "object", "properties": {"base_branch": {"type": "string"}}, "required": ["base_branch"]}},
+        responses={201: dict, 400: dict, 403: dict, 404: dict, 409: dict},
+        tags=["tasks"],
+        summary="Create GitHub branch for a task",
+        description="Creates a branch named '{task_id}-{slug}' in the project's GitHub repo and returns the git checkout command.",
+    )
+    def post(self, request, task_id: int):
+        base_branch = (request.data.get("base_branch") or "").strip()
+        if not base_branch:
+            return Response({"detail": "base_branch es requerido."}, status=status.HTTP_400_BAD_REQUEST)
+
+        user = request.user
+        task = Task.objects.select_related("project").filter(pk=task_id).first()
+        if not task:
+            return Response({"detail": "Tarea no encontrada."}, status=status.HTTP_404_NOT_FOUND)
+
+        project = task.project
+        has_access = (
+            project.created_by_id == user.id_user
+            or ProjectMember.objects.filter(project=project, user=user).exists()
+        )
+        if not has_access:
+            return Response({"detail": "No tienes acceso a este proyecto."}, status=status.HTTP_403_FORBIDDEN)
+
+        project_repo = ProjectRepo.objects.filter(project=project).first()
+        repo_full_name = (project_repo.repo_full_name if project_repo else None) or project.github_repo_full_name
+        if not repo_full_name:
+            return Response(
+                {"detail": "El proyecto no tiene un repositorio de GitHub vinculado."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        org_login = repo_full_name.split("/")[0]
+        installation = GithubAppInstallation.objects.filter(account_login__iexact=org_login).first()
+        if not installation:
+            return Response(
+                {"detail": f"No se encontró instalación de GitHub App para '{org_login}'."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            token = _installation_access_token(installation.installation_id)
+        except Exception as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        headers = _github_headers(token)
+
+        ref_resp = requests.get(
+            f"{GITHUB_API_URL}/repos/{repo_full_name}/git/ref/heads/{base_branch}",
+            headers=headers,
+            timeout=20,
+        )
+        if ref_resp.status_code == 404:
+            return Response(
+                {"detail": f"La rama base '{base_branch}' no existe."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if ref_resp.status_code >= 400:
+            return Response(
+                {"detail": "Error consultando la rama base en GitHub.", "github_response": ref_resp.text},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        sha = ref_resp.json().get("object", {}).get("sha")
+        if not sha:
+            return Response({"detail": "No se pudo obtener el SHA de la rama base."}, status=status.HTTP_400_BAD_REQUEST)
+
+        slug = _slugify(task.title)
+        branch_name = f"{task_id}-{slug}" if slug else str(task_id)
+
+        create_resp = requests.post(
+            f"{GITHUB_API_URL}/repos/{repo_full_name}/git/refs",
+            headers=headers,
+            json={"ref": f"refs/heads/{branch_name}", "sha": sha},
+            timeout=20,
+        )
+        if create_resp.status_code == 422:
+            return Response(
+                {"detail": f"La rama '{branch_name}' ya existe en GitHub."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        if create_resp.status_code >= 400:
+            return Response(
+                {"detail": "Error creando la rama en GitHub.", "github_response": create_resp.text},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        return Response(
+            {
+                "branch_name": branch_name,
+                "checkout_command": f"git fetch origin && git checkout {branch_name}",
+            },
+            status=status.HTTP_201_CREATED,
+        )
 
 
 class HealthCheckView(APIView):

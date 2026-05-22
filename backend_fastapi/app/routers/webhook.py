@@ -3,6 +3,7 @@ import hmac
 import json
 import logging
 import os
+import re
 
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request, status
 from slowapi import Limiter
@@ -63,10 +64,30 @@ async def _run_push_analysis(payload: dict, db: Session) -> None:
         logger.info("No project found for repo: %s", repo_full_name)
         return
 
+    # Determine if this is a task-targeted branch ({task_id}-slug or {task_id})
+    branch_name = ref.replace("refs/heads/", "").replace("refs/tags/", "")
+    task_id_match = re.match(r"^(\d+)(?:-|$)", branch_name)
+    is_task_branch = bool(task_id_match)
+
+    # review_branches filter: only applied to non-task branches
+    if not is_task_branch and project.review_branches and project.review_branches.strip():
+        allowed = {b.strip() for b in project.review_branches.split(",") if b.strip()}
+        if branch_name not in allowed:
+            logger.info("Branch '%s' not in review_branches (%s) for project %s — skipping", branch_name, project.review_branches, project.id_project)
+            return
+
     tasks = get_active_tasks(db, project.id_project)
     if not tasks:
         logger.info("No active tasks for project %s — skipping analysis", project.id_project)
         return
+
+    # Branch-based task routing: if branch matches {task_id}-... only evaluate that task
+    if is_task_branch:
+        targeted_id = int(task_id_match.group(1))
+        targeted = [t for t in tasks if t.id_task == targeted_id]
+        if targeted:
+            tasks = targeted
+            logger.info("Branch '%s' targets task %d — running targeted single-task analysis", branch_name, targeted_id)
 
     logger.info("Fetching diff for %s (%s...%s) installation_id=%s", repo_full_name, before[:7], after[:7], installation_id)
     diff = await fetch_push_diff(repo_full_name, before, after, installation_id)
@@ -130,6 +151,8 @@ async def _run_push_analysis(payload: dict, db: Session) -> None:
             if isinstance(w, dict):
                 msg = w.get("message", "")
                 sev = w.get("severity", "warning")
+                if sev not in ("critical", "warning", "info"):
+                    sev = "warning"
             else:
                 msg = str(w)
                 sev = "warning"

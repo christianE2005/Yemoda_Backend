@@ -29,6 +29,7 @@ class Project(Base):
         nullable=True,
     )
     github_repo_full_name: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    review_branches: Mapped[str] = mapped_column(String(255), nullable=False, default="")
 
 
 class ProjectRepo(Base):
