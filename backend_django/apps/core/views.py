@@ -2388,10 +2388,15 @@ class CreateCheckoutSessionView(APIView):
         import stripe
         stripe.api_key = settings.STRIPE_SECRET_KEY
 
-        price_id = settings.STRIPE_PRICE_ID
+        plan = request.data.get("plan", "monthly")
+        if plan == "annual":
+            price_id = settings.STRIPE_PRICE_ID_ANNUAL
+        else:
+            price_id = settings.STRIPE_PRICE_ID_MONTHLY
+
         if not price_id:
             return Response(
-                {"detail": "STRIPE_PRICE_ID not configured."},
+                {"detail": f"STRIPE_PRICE_ID_{plan.upper()} not configured."},
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
 
