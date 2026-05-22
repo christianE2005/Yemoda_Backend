@@ -38,6 +38,7 @@ class UserAccount(models.Model):
         db_column="id_system_role",
         related_name="users",
     )
+    is_premium = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -673,4 +674,35 @@ class GithubRepo(models.Model):
 
     class Meta:
         db_table = "github_repo"
+        ordering = ["-created_at"]
+
+
+class StripePayment(models.Model):
+    PENDING = "pending"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+    STATUS_CHOICES = [
+        (PENDING, "Pending"),
+        (COMPLETED, "Completed"),
+        (FAILED, "Failed"),
+    ]
+
+    id_payment = models.BigAutoField(primary_key=True)
+    user = models.ForeignKey(
+        UserAccount,
+        on_delete=models.CASCADE,
+        db_column="id_user",
+        related_name="stripe_payments",
+    )
+    checkout_session_id = models.CharField(max_length=255, unique=True)
+    stripe_customer_id = models.CharField(max_length=255, null=True, blank=True)
+    amount_total = models.IntegerField(null=True, blank=True, help_text="Amount in cents")
+    currency = models.CharField(max_length=10, null=True, blank=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=PENDING)
+    created_at = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "stripe_payment"
         ordering = ["-created_at"]

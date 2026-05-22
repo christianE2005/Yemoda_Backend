@@ -24,6 +24,7 @@ from .models import (
     TaskStatus,
     TaskWarning,
     UserAccount,
+    StripePayment,
 )
 
 admin.site.register(UserAccount)
@@ -49,3 +50,4 @@ admin.site.register(GithubConnection)
 admin.site.register(GithubAppInstallation)
 admin.site.register(GithubPushEvent)
 admin.site.register(GithubRepo)
+admin.site.register(StripePayment)

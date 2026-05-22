@@ -47,6 +47,7 @@ from .models import (
     TaskStatus,
     TaskWarning,
     UserAccount,
+    StripePayment,
 )
 from .serializers import (
     ActivityLogSerializer,
@@ -2380,6 +2381,81 @@ class HealthCheckView(APIView):
 
     def get(self, request):
         return Response({"status": "ok"}, status=status.HTTP_200_OK)
+
+
+class CreateCheckoutSessionView(APIView):
+    def post(self, request):
+        import stripe
+        stripe.api_key = settings.STRIPE_SECRET_KEY
+
+        price_id = settings.STRIPE_PRICE_ID
+        if not price_id:
+            return Response(
+                {"detail": "STRIPE_PRICE_ID not configured."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        try:
+            session = stripe.checkout.Session.create(
+                line_items=[{"price": price_id, "quantity": 1}],
+                mode="payment",
+                success_url=settings.STRIPE_SUCCESS_URL,
+                cancel_url=settings.STRIPE_CANCEL_URL,
+                customer_email=request.user.email,
+                metadata={"user_id": str(request.user.id_user)},
+            )
+        except stripe.StripeError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
+
+        StripePayment.objects.create(
+            user=request.user,
+            checkout_session_id=session.id,
+            status=StripePayment.PENDING,
+        )
+
+        return Response({"checkout_url": session.url}, status=status.HTTP_201_CREATED)
+
+
+class StripeWebhookView(APIView):
+    authentication_classes = []
+    permission_classes = []
+
+    def post(self, request):
+        import stripe
+        stripe.api_key = settings.STRIPE_SECRET_KEY
+
+        payload = request.body
+        sig_header = request.META.get("HTTP_STRIPE_SIGNATURE", "")
+        webhook_secret = settings.STRIPE_WEBHOOK_SECRET
+
+        try:
+            event = stripe.Webhook.construct_event(payload, sig_header, webhook_secret)
+        except stripe.error.SignatureVerificationError:
+            return Response({"detail": "Invalid signature."}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception:
+            return Response({"detail": "Invalid payload."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if event["type"] == "checkout.session.completed":
+            from django.utils import timezone
+            session_data = event["data"]["object"]
+            session_id = session_data.get("id")
+
+            try:
+                payment = StripePayment.objects.get(checkout_session_id=session_id)
+            except StripePayment.DoesNotExist:
+                return Response(status=status.HTTP_200_OK)
+
+            payment.status = StripePayment.COMPLETED
+            payment.stripe_customer_id = session_data.get("customer")
+            payment.amount_total = session_data.get("amount_total")
+            payment.currency = session_data.get("currency")
+            payment.completed_at = timezone.now()
+            payment.save()
+
+            payment.user.is_premium = True
+            payment.user.save(update_fields=["is_premium"])
+
+        return Response(status=status.HTTP_200_OK)
 
 
 class GithubAppDebugView(APIView):

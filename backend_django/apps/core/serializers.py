@@ -37,10 +37,11 @@ class SystemRoleSerializer(serializers.ModelSerializer):
 class UserAccountSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True, required=False, min_length=8)
     system_role_name = serializers.CharField(source="system_role.name", read_only=True)
+    is_premium = serializers.BooleanField(read_only=True)
 
     class Meta:
         model = UserAccount
-        fields = ["id_user", "email", "username", "password", "system_role", "system_role_name", "created_at"]
+        fields = ["id_user", "email", "username", "password", "system_role", "system_role_name", "is_premium", "created_at"]
 
     def create(self, validated_data):
         password = validated_data.pop("password", None)
