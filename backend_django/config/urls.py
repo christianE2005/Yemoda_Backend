@@ -35,7 +35,6 @@ from apps.core.views import (
     RefreshView,
     RoleViewSet,
     SprintViewSet,
-    SystemRoleViewSet,
     TagViewSet,
     TaskAssignmentViewSet,
     TaskCommentViewSet,
@@ -56,7 +55,6 @@ router = DefaultRouter()
 router.register(r"user-accounts", UserAccountViewSet)
 router.register(r"projects", ProjectViewSet)
 router.register(r"roles", RoleViewSet)
-router.register(r"system-roles", SystemRoleViewSet)
 router.register(r"project-members", ProjectMemberViewSet)
 router.register(r"boards", BoardViewSet)
 router.register(r"board-columns", BoardColumnViewSet)

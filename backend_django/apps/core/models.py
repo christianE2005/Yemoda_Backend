@@ -1,43 +1,12 @@
 from django.db import models
 
 
-class SystemRole(models.Model):
-    ADMIN = "Admin"
-    USER = "User"
-    STAKEHOLDER = "Stakeholder"
-    PROJECT_MANAGER = "Project Manager"
-
-    ROLE_CHOICES = [
-        (ADMIN, "Admin"),
-        (USER, "User"),
-        (STAKEHOLDER, "Stakeholder"),
-        (PROJECT_MANAGER, "Project Manager"),
-    ]
-
-    id_system_role = models.BigAutoField(primary_key=True)
-    name = models.CharField(max_length=50, unique=True, choices=ROLE_CHOICES)
-    description = models.TextField(null=True, blank=True)
-
-    class Meta:
-        db_table = "system_role"
-
-    def __str__(self):
-        return self.name
-
-
 class UserAccount(models.Model):
     id_user = models.BigAutoField(primary_key=True)
     email = models.EmailField(max_length=150, unique=True)
     username = models.CharField(max_length=100)
     password_hash = models.CharField(max_length=255)
-    system_role = models.ForeignKey(
-        SystemRole,
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        db_column="id_system_role",
-        related_name="users",
-    )
+    is_admin = models.BooleanField(default=False)
     is_premium = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -52,9 +21,6 @@ class UserAccount(models.Model):
     def is_active(self):
         return True
 
-    @property
-    def is_admin(self):
-        return self.system_role is not None and self.system_role.name == SystemRole.ADMIN
 
 
 class Project(models.Model):

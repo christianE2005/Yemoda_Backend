@@ -50,7 +50,7 @@ class TestProjects:
         assert resp.status_code == status.HTTP_200_OK
         assert resp.data["name"] == "Project A"
 
-    def test_other_user_cannot_see_project(self, api_client, regular_user, auth_headers, user_role):
+    def test_other_user_cannot_see_project(self, api_client, regular_user, auth_headers):
         create = api_client.post(
             "/api/projects/",
             {"name": "Private Project"},
@@ -63,7 +63,6 @@ class TestProjects:
             email="other@test.com",
             username="other",
             password_hash=make_password("pass123456"),
-            system_role=user_role,
         )
         login = api_client.post(
             "/api/auth/login/",
@@ -135,7 +134,7 @@ class TestTasks:
         assert resp.data["title"] == "Test Task"
         assert resp.data["project"] == pid
 
-    def test_list_tasks_only_own_projects(self, api_client, regular_user, auth_headers, user_role):
+    def test_list_tasks_only_own_projects(self, api_client, regular_user, auth_headers):
         project = api_client.post(
             "/api/projects/",
             {"name": "My Project"},
@@ -154,7 +153,6 @@ class TestTasks:
             email="other2@test.com",
             username="other2",
             password_hash=make_password("pass123456"),
-            system_role=user_role,
         )
         login = api_client.post(
             "/api/auth/login/",

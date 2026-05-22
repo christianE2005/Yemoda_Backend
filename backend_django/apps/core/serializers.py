@@ -14,7 +14,6 @@ from .models import (
     ProjectRepo,
     Role,
     Sprint,
-    SystemRole,
     Tag,
     Task,
     TaskAssignment,
@@ -27,21 +26,14 @@ from .models import (
 )
 
 
-
-class SystemRoleSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = SystemRole
-        fields = "__all__"
-
-
 class UserAccountSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True, required=False, min_length=8)
-    system_role_name = serializers.CharField(source="system_role.name", read_only=True)
+    is_admin = serializers.BooleanField(read_only=True)
     is_premium = serializers.BooleanField(read_only=True)
 
     class Meta:
         model = UserAccount
-        fields = ["id_user", "email", "username", "password", "system_role", "system_role_name", "is_premium", "created_at"]
+        fields = ["id_user", "email", "username", "password", "is_admin", "is_premium", "created_at"]
 
     def create(self, validated_data):
         password = validated_data.pop("password", None)
@@ -219,7 +211,6 @@ class RegisterSerializer(serializers.Serializer):
     email = serializers.EmailField(max_length=150)
     username = serializers.CharField(max_length=100)
     password = serializers.CharField(write_only=True, min_length=8)
-    system_role_id = serializers.IntegerField(required=False, help_text="ID del rol del sistema (opcional).")
 
 
 class LoginSerializer(serializers.Serializer):

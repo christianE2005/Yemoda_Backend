@@ -14,7 +14,6 @@ from .models import (
     ProjectRepo,
     Role,
     Sprint,
-    SystemRole,
     Tag,
     Task,
     TaskAssignment,
@@ -28,7 +27,6 @@ from .models import (
 )
 
 admin.site.register(UserAccount)
-admin.site.register(SystemRole)
 admin.site.register(Project)
 admin.site.register(ProjectRepo)
 admin.site.register(Role)
