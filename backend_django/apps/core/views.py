@@ -11,7 +11,7 @@ import jwt
 import requests
 from django.conf import settings
 from django.contrib.auth.hashers import check_password, make_password
-from django.http import HttpResponse
+from django.http import HttpResponse, HttpResponseRedirect
 from django.db import models
 from django.db.models import Q
 from drf_spectacular.utils import extend_schema
@@ -863,6 +863,135 @@ class ChangePasswordView(APIView):
         request.user.password_hash = make_password(new_password)
         request.user.save(update_fields=["password_hash"])
         return Response({"detail": "Contraseña actualizada correctamente."}, status=status.HTTP_200_OK)
+
+
+# ── Google OAuth ──────────────────────────────────────────────────────────────
+GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
+
+
+def _build_google_oauth_state() -> str:
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+    payload = {
+        "nonce": secrets.token_urlsafe(24),
+        "exp": int(expires_at.timestamp()),
+        "purpose": "google_oauth",
+    }
+    return jwt.encode(payload, settings.GOOGLE_STATE_SECRET, algorithm="HS256")
+
+
+def _validate_google_oauth_state(state: str) -> bool:
+    try:
+        payload = jwt.decode(state, settings.GOOGLE_STATE_SECRET, algorithms=["HS256"])
+    except jwt.InvalidTokenError:
+        return False
+    return payload.get("purpose") == "google_oauth"
+
+
+class GoogleOauthStartView(APIView):
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    @extend_schema(
+        responses={200: dict, 503: dict},
+        tags=["auth"],
+        summary="Iniciar flujo OAuth con Google",
+        description="Devuelve la URL de autorización de Google. El frontend redirige al usuario a esa URL.",
+    )
+    def get(self, request):
+        if not settings.GOOGLE_CLIENT_ID or not settings.GOOGLE_REDIRECT_URI:
+            return Response(
+                {"detail": "Google OAuth no está configurado."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        state = _build_google_oauth_state()
+        params = {
+            "client_id": settings.GOOGLE_CLIENT_ID,
+            "redirect_uri": settings.GOOGLE_REDIRECT_URI,
+            "response_type": "code",
+            "scope": "openid email profile",
+            "state": state,
+            "access_type": "offline",
+            "prompt": "select_account",
+        }
+        auth_url = f"{GOOGLE_AUTH_URL}?{urlencode(params)}"
+        return Response({"auth_url": auth_url, "state": state})
+
+
+class GoogleOauthCallbackView(APIView):
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    @extend_schema(
+        responses={302: None, 400: dict},
+        tags=["auth"],
+        summary="Callback de Google OAuth",
+        description="Google redirige aquí con el código de autorización. El backend lo intercambia, crea o recupera el usuario y redirige al frontend con los tokens JWT.",
+    )
+    def get(self, request):
+        frontend_redirect = settings.GOOGLE_AUTH_FRONTEND_REDIRECT
+        error = request.query_params.get("error")
+        code = request.query_params.get("code")
+        state = request.query_params.get("state", "")
+
+        if error or not code:
+            return HttpResponseRedirect(f"{frontend_redirect}?error={error or 'no_code'}")
+
+        if not _validate_google_oauth_state(state):
+            return HttpResponseRedirect(f"{frontend_redirect}?error=invalid_state")
+
+        # Exchange authorization code for Google access token
+        token_resp = requests.post(
+            GOOGLE_TOKEN_URL,
+            data={
+                "code": code,
+                "client_id": settings.GOOGLE_CLIENT_ID,
+                "client_secret": settings.GOOGLE_CLIENT_SECRET,
+                "redirect_uri": settings.GOOGLE_REDIRECT_URI,
+                "grant_type": "authorization_code",
+            },
+            timeout=15,
+        )
+        if not token_resp.ok:
+            return HttpResponseRedirect(f"{frontend_redirect}?error=token_exchange_failed")
+
+        google_access_token = token_resp.json().get("access_token")
+        if not google_access_token:
+            return HttpResponseRedirect(f"{frontend_redirect}?error=no_access_token")
+
+        # Fetch user info from Google
+        userinfo_resp = requests.get(
+            GOOGLE_USERINFO_URL,
+            headers={"Authorization": f"Bearer {google_access_token}"},
+            timeout=15,
+        )
+        if not userinfo_resp.ok:
+            return HttpResponseRedirect(f"{frontend_redirect}?error=userinfo_failed")
+
+        userinfo = userinfo_resp.json()
+        email = userinfo.get("email")
+        if not email:
+            return HttpResponseRedirect(f"{frontend_redirect}?error=no_email")
+
+        # Auto-register new users on first Google login
+        name = userinfo.get("name") or email.split("@")[0]
+        user, _ = UserAccount.objects.get_or_create(
+            email=email,
+            defaults={
+                "username": name,
+                "password_hash": make_password(None),  # unusable — Google-only login
+            },
+        )
+
+        tokens = _issue_tokens(user)
+        redirect_url = (
+            f"{frontend_redirect}"
+            f"?access_token={tokens['access_token']}"
+            f"&refresh_token={tokens['refresh_token']}"
+            f"&expires_at={tokens['expires_at']}"
+        )
+        return HttpResponseRedirect(redirect_url)
 
 
 class GithubAppInstallStartView(APIView):

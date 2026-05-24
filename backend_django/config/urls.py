@@ -48,6 +48,8 @@ from apps.core.views import (
     TaskWarningListView,
     UserAccountViewSet,
     CreateCheckoutSessionView,
+    GoogleOauthCallbackView,
+    GoogleOauthStartView,
     StripeWebhookView,
 )
 
@@ -79,6 +81,8 @@ urlpatterns = [
     path("api/auth/login/", LoginView.as_view(), name="auth-login"),
     path("api/auth/refresh/", RefreshView.as_view(), name="auth-refresh"),
     path("api/auth/change-password/", ChangePasswordView.as_view(), name="auth-change-password"),
+    path("api/auth/google/start/", GoogleOauthStartView.as_view(), name="google-oauth-start"),
+    path("api/auth/google/callback/", GoogleOauthCallbackView.as_view(), name="google-oauth-callback"),
     path("api/github/app/install/start/", GithubAppInstallStartView.as_view(), name="github-app-install-start"),
     path("api/github/app/oauth/start/", GithubAppOauthStartView.as_view(), name="github-app-oauth-start"),
     path("api/github/app/oauth/callback/", GithubAppOauthCallbackView.as_view(), name="github-app-oauth-callback"),

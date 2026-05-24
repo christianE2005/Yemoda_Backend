@@ -199,3 +199,10 @@ STRIPE_PRICE_ID_MONTHLY = os.getenv("STRIPE_PRICE_ID_MONTHLY", "")
 STRIPE_PRICE_ID_ANNUAL = os.getenv("STRIPE_PRICE_ID_ANNUAL", "")
 STRIPE_SUCCESS_URL = os.getenv("STRIPE_SUCCESS_URL", "https://yemoda.site/payment/success")
 STRIPE_CANCEL_URL = os.getenv("STRIPE_CANCEL_URL", "https://yemoda.site/payment/cancel")
+
+# Google OAuth
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
+GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", "")
+GOOGLE_AUTH_FRONTEND_REDIRECT = os.getenv("GOOGLE_AUTH_FRONTEND_REDIRECT", "https://yemoda.site/auth/google/callback")
+GOOGLE_STATE_SECRET = os.getenv("GOOGLE_STATE_SECRET", JWT_SECRET_KEY)
