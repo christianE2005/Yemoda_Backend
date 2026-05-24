@@ -8,6 +8,7 @@ class UserAccount(models.Model):
     password_hash = models.CharField(max_length=255)
     is_admin = models.BooleanField(default=False)
     is_premium = models.BooleanField(default=False)
+    is_email_verified = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -672,3 +673,20 @@ class StripePayment(models.Model):
     class Meta:
         db_table = "stripe_payment"
         ordering = ["-created_at"]
+
+
+class EmailVerificationToken(models.Model):
+    id = models.BigAutoField(primary_key=True)
+    user = models.ForeignKey(
+        UserAccount,
+        on_delete=models.CASCADE,
+        db_column="id_user",
+        related_name="verification_tokens",
+    )
+    token = models.CharField(max_length=100, unique=True, db_index=True)
+    expires_at = models.DateTimeField()
+    used = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "email_verification_token"

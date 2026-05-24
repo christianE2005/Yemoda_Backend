@@ -47,6 +47,7 @@ from .models import (
     TaskWarning,
     UserAccount,
     StripePayment,
+    EmailVerificationToken,
 )
 from .serializers import (
     ActivityLogSerializer,
@@ -65,6 +66,7 @@ from .serializers import (
     ProjectSerializer,
     RefreshSerializer,
     RegisterSerializer,
+    ResendVerificationSerializer,
     RoleSerializer,
     SprintSerializer,
     TagSerializer,
@@ -284,6 +286,51 @@ def _build_signed_oauth_state() -> str:
         "purpose": "github_app_oauth",
     }
     return jwt.encode(payload, settings.GITHUB_APP_STATE_SECRET, algorithm="HS256")
+
+
+# ── Email verification ────────────────────────────────────────────────────────
+
+def _send_verification_email(user: "UserAccount") -> None:
+    """Creates a new email verification token and sends the link via Resend."""
+    # Invalidate any previous unused tokens for this user
+    EmailVerificationToken.objects.filter(user=user, used=False).delete()
+
+    token_value = secrets.token_urlsafe(32)
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=24)
+    EmailVerificationToken.objects.create(
+        user=user,
+        token=token_value,
+        expires_at=expires_at,
+    )
+
+    verify_link = f"{settings.EMAIL_VERIFICATION_BASE_URL}?token={token_value}"
+    html_body = f"""
+    <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto">
+      <h2 style="color:#1a1a1a">Verifica tu correo electrónico</h2>
+      <p>Hola <strong>{user.username}</strong>, gracias por registrarte en Yemoda.</p>
+      <p>Haz clic en el botón de abajo para verificar tu correo. El enlace expira en <strong>24 horas</strong>.</p>
+      <a href="{verify_link}"
+         style="display:inline-block;padding:12px 24px;background:#4f46e5;color:#fff;
+                text-decoration:none;border-radius:6px;font-weight:bold;margin:16px 0">
+        Verificar correo
+      </a>
+      <p style="color:#666;font-size:12px">Si no creaste esta cuenta, puedes ignorar este correo.</p>
+    </div>
+    """
+    requests.post(
+        "https://api.resend.com/emails",
+        headers={
+            "Authorization": f"Bearer {settings.RESEND_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "from": settings.RESEND_FROM_EMAIL,
+            "to": [user.email],
+            "subject": "Verifica tu correo — Yemoda",
+            "html": html_body,
+        },
+        timeout=10,
+    )
 
 
 def _validate_signed_oauth_state(state: str) -> bool:
@@ -767,7 +814,14 @@ class RegisterView(APIView):
             username=username,
             password_hash=make_password(password),
         )
-        return Response(UserAccountSerializer(user).data, status=status.HTTP_201_CREATED)
+        try:
+            _send_verification_email(user)
+        except Exception:
+            pass  # Never block registration if email delivery fails
+        return Response(
+            {"detail": "Registro exitoso. Revisa tu correo para verificar tu cuenta."},
+            status=status.HTTP_201_CREATED,
+        )
 
 
 class LoginView(APIView):
@@ -791,6 +845,12 @@ class LoginView(APIView):
         user = UserAccount.objects.filter(email=email).first()
         if not user or not check_password(password, user.password_hash):
             return Response({"detail": "Credenciales invalidas."}, status=status.HTTP_401_UNAUTHORIZED)
+
+        if not user.is_email_verified:
+            return Response(
+                {"detail": "Por favor verifica tu correo electrónico antes de iniciar sesión.", "code": "email_not_verified"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
 
         tokens = _issue_tokens(user)
         return Response({**tokens, "user": UserAccountSerializer(user).data}, status=status.HTTP_200_OK)
@@ -863,6 +923,70 @@ class ChangePasswordView(APIView):
         request.user.password_hash = make_password(new_password)
         request.user.save(update_fields=["password_hash"])
         return Response({"detail": "Contraseña actualizada correctamente."}, status=status.HTTP_200_OK)
+
+
+class VerifyEmailView(APIView):
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    @extend_schema(
+        responses={302: None},
+        tags=["auth"],
+        summary="Verificar correo electrónico",
+        description="El usuario llega aquí desde el link del correo. Verifica el token y redirige al frontend.",
+    )
+    def get(self, request):
+        token_value = request.query_params.get("token", "")
+        redirect_base = settings.EMAIL_VERIFIED_REDIRECT
+
+        if not token_value:
+            return HttpResponseRedirect(f"{redirect_base}?error=missing_token")
+
+        now = datetime.now(timezone.utc)
+        record = EmailVerificationToken.objects.select_related("user").filter(
+            token=token_value, used=False, expires_at__gt=now
+        ).first()
+
+        if not record:
+            return HttpResponseRedirect(f"{redirect_base}?error=invalid_or_expired_token")
+
+        record.used = True
+        record.save(update_fields=["used"])
+        record.user.is_email_verified = True
+        record.user.save(update_fields=["is_email_verified"])
+
+        return HttpResponseRedirect(f"{redirect_base}?success=true")
+
+
+class ResendVerificationEmailView(APIView):
+    authentication_classes = []
+    permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "resend_verification"
+
+    @extend_schema(
+        request=ResendVerificationSerializer,
+        responses={200: dict},
+        tags=["auth"],
+        summary="Reenviar correo de verificación",
+    )
+    def post(self, request):
+        serializer = ResendVerificationSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        email = serializer.validated_data["email"]
+
+        # Always return 200 to avoid email enumeration
+        user = UserAccount.objects.filter(email=email, is_email_verified=False).first()
+        if user:
+            try:
+                _send_verification_email(user)
+            except Exception:
+                pass
+
+        return Response(
+            {"detail": "Si el correo existe y no está verificado, recibirás un nuevo enlace."},
+            status=status.HTTP_200_OK,
+        )
 
 
 # ── Google OAuth ──────────────────────────────────────────────────────────────
@@ -974,13 +1098,14 @@ class GoogleOauthCallbackView(APIView):
         if not email:
             return HttpResponseRedirect(f"{frontend_redirect}?error=no_email")
 
-        # Auto-register new users on first Google login
+        # Auto-register new users on first Google login (Google already verified the email)
         name = userinfo.get("name") or email.split("@")[0]
         user, _ = UserAccount.objects.get_or_create(
             email=email,
             defaults={
                 "username": name,
                 "password_hash": make_password(None),  # unusable — Google-only login
+                "is_email_verified": True,
             },
         )
 

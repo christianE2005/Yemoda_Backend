@@ -33,6 +33,7 @@ from apps.core.views import (
     PullRequestListView,
     PullRequestReviewView,
     RefreshView,
+    ResendVerificationEmailView,
     RoleViewSet,
     SprintViewSet,
     TagViewSet,
@@ -50,6 +51,7 @@ from apps.core.views import (
     CreateCheckoutSessionView,
     GoogleOauthCallbackView,
     GoogleOauthStartView,
+    VerifyEmailView,
     StripeWebhookView,
 )
 
@@ -81,6 +83,8 @@ urlpatterns = [
     path("api/auth/login/", LoginView.as_view(), name="auth-login"),
     path("api/auth/refresh/", RefreshView.as_view(), name="auth-refresh"),
     path("api/auth/change-password/", ChangePasswordView.as_view(), name="auth-change-password"),
+    path("api/auth/verify-email/", VerifyEmailView.as_view(), name="auth-verify-email"),
+    path("api/auth/resend-verification/", ResendVerificationEmailView.as_view(), name="auth-resend-verification"),
     path("api/auth/google/start/", GoogleOauthStartView.as_view(), name="google-oauth-start"),
     path("api/auth/google/callback/", GoogleOauthCallbackView.as_view(), name="google-oauth-callback"),
     path("api/github/app/install/start/", GithubAppInstallStartView.as_view(), name="github-app-install-start"),

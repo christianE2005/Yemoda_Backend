@@ -151,6 +151,7 @@ REST_FRAMEWORK = {
         "github_oauth": "10/minute",
         "github_repo_create": "10/minute",
         "github_repo_contents": "60/minute",
+        "resend_verification": "3/hour",
     },
 }
 
@@ -206,3 +207,11 @@ GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
 GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", "")
 GOOGLE_AUTH_FRONTEND_REDIRECT = os.getenv("GOOGLE_AUTH_FRONTEND_REDIRECT", "https://yemoda.site/auth/google/callback")
 GOOGLE_STATE_SECRET = os.getenv("GOOGLE_STATE_SECRET", JWT_SECRET_KEY)
+
+# Resend (email)
+RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
+RESEND_FROM_EMAIL = os.getenv("RESEND_FROM_EMAIL", "noreply@yemoda.site")
+# Full backend URL prefix for the verification link in emails
+EMAIL_VERIFICATION_BASE_URL = os.getenv("EMAIL_VERIFICATION_BASE_URL", "https://yemoda.site/api/auth/verify-email/")
+# Frontend page to redirect to after verification (success or error)
+EMAIL_VERIFIED_REDIRECT = os.getenv("EMAIL_VERIFIED_REDIRECT", "https://yemoda.site/auth/verified")
