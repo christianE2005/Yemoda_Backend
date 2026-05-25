@@ -70,10 +70,11 @@ async def _run_push_analysis(payload: dict, db: Session) -> None:
     is_task_branch = bool(task_id_match)
 
     # review_branches filter: only applied to non-task branches
-    if not is_task_branch and project.review_branches and project.review_branches.strip():
-        allowed = {b.strip() for b in project.review_branches.split(",") if b.strip()}
+    _review_branches = getattr(project, 'review_branches', '') or ''
+    if not is_task_branch and _review_branches.strip():
+        allowed = {b.strip() for b in _review_branches.split(",") if b.strip()}
         if branch_name not in allowed:
-            logger.info("Branch '%s' not in review_branches (%s) for project %s — skipping", branch_name, project.review_branches, project.id_project)
+            logger.info("Branch '%s' not in review_branches (%s) for project %s — skipping", branch_name, _review_branches, project.id_project)
             return
 
     tasks = get_active_tasks(db, project.id_project)
