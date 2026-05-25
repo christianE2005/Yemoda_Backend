@@ -1153,17 +1153,23 @@ class GithubAppOauthStartView(APIView):
                 {"detail": "GITHUB_APP_CLIENT_ID o GITHUB_APP_OAUTH_CALLBACK_URL no configurados."},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
+        if not settings.GITHUB_APP_SLUG:
+            return Response(
+                {"detail": "GITHUB_APP_SLUG no configurado."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
         state = _build_signed_oauth_state()
+        # Redirect to the App installation page instead of plain OAuth authorize.
+        # This installs the App on the user's personal account AND triggers OAuth
+        # (requires "Request user authorization during installation" enabled in the
+        # GitHub App settings). Installation grants the Administration permission
+        # needed for POST /user/repos.
         params = {
-            "client_id": settings.GITHUB_APP_CLIENT_ID,
-            "redirect_uri": settings.GITHUB_APP_OAUTH_CALLBACK_URL,
             "state": state,
-            # Note: GitHub Apps ignore the 'scope' parameter.
-            # Permissions are controlled via the GitHub App settings on github.com
-            # (User permissions → Administration: Read & Write for repo creation).
+            "redirect_uri": settings.GITHUB_APP_OAUTH_CALLBACK_URL,
         }
-        authorize_url = f"https://github.com/login/oauth/authorize?{urlencode(params)}"
+        authorize_url = f"https://github.com/apps/{settings.GITHUB_APP_SLUG}/installations/new?{urlencode(params)}"
         return Response({"authorize_url": authorize_url, "state": state}, status=status.HTTP_200_OK)
 
 
