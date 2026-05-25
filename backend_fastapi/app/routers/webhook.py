@@ -122,6 +122,7 @@ async def _run_push_analysis(payload: dict, db: Session) -> None:
 
     try:
         coding_style, review_focus, tech_stack, naming_convention, response_language, custom_instructions = get_board_review_settings(db, project.id_project)
+        logger.info("Board settings loaded for project %s: style=%s, focus=%s, stack=%s, naming=%s, lang=%s, custom=%s", project.id_project, coding_style, review_focus, tech_stack, naming_convention, response_language, bool(custom_instructions))
         analysis = analyze_push(stories, diff, active_warnings=active_warnings_map, coding_style=coding_style, review_focus=review_focus, tech_stack=tech_stack, naming_convention=naming_convention, response_language=response_language, custom_instructions=custom_instructions)
         logger.info("Analysis complete for project %s (style=%s, focus=%s, stack=%s, naming=%s, lang=%s, custom=%s): %d matches", project.id_project, coding_style, review_focus, tech_stack, naming_convention, response_language, bool(custom_instructions), len(analysis.get("matches", [])))
     except Exception as exc:
