@@ -434,20 +434,11 @@ class ProjectViewSet(viewsets.ModelViewSet):
             pass
 
 
-class RoleViewSet(viewsets.ModelViewSet):
+class RoleViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = Role.objects.all()
     serializer_class = RoleSerializer
-
-    def get_permissions(self):
-        if self.action in ('list', 'retrieve'):
-            authentication_classes = []
-            return [AllowAny()]
-        return [IsAdminUser()]
-
-    def get_authenticators(self):
-        if self.action in ('list', 'retrieve'):
-            return []
-        return super().get_authenticators()
+    authentication_classes = []
+    permission_classes = [AllowAny]
 
 
 class ProjectMemberViewSet(viewsets.ModelViewSet):
