@@ -278,13 +278,15 @@ def _add_github_collaborator(repo_full_name: str, github_login: str, admin_token
     return "ok"
 
 
-def _build_signed_oauth_state() -> str:
+def _build_signed_oauth_state(user_id: int | None = None) -> str:
     expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
     payload = {
         "nonce": secrets.token_urlsafe(24),
         "exp": int(expires_at.timestamp()),
         "purpose": "github_app_oauth",
     }
+    if user_id is not None:
+        payload["uid"] = user_id
     return jwt.encode(payload, settings.GITHUB_APP_STATE_SECRET, algorithm="HS256")
 
 
@@ -333,12 +335,15 @@ def _send_verification_email(user: "UserAccount") -> None:
     )
 
 
-def _validate_signed_oauth_state(state: str) -> bool:
+def _validate_signed_oauth_state(state: str) -> tuple[bool, int | None]:
+    """Returns (is_valid, user_id_from_state_or_None)."""
     try:
         payload = jwt.decode(state, settings.GITHUB_APP_STATE_SECRET, algorithms=["HS256"])
     except jwt.InvalidTokenError:
-        return False
-    return payload.get("purpose") == "github_app_oauth"
+        return False, None
+    if payload.get("purpose") != "github_app_oauth":
+        return False, None
+    return True, payload.get("uid")
 
 
 def _user_from_bearer_token(request) -> UserAccount | None:
@@ -1159,7 +1164,7 @@ class GithubAppOauthStartView(APIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
-        state = _build_signed_oauth_state()
+        state = _build_signed_oauth_state(user_id=getattr(_user_from_bearer_token(request), 'id_user', None))
         # Redirect to the App installation page instead of plain OAuth authorize.
         # This installs the App on the user's personal account AND triggers OAuth
         # (requires "Request user authorization during installation" enabled in the
@@ -1178,7 +1183,8 @@ class GithubAppOauthCallbackView(APIView):
 
     @extend_schema(request=GithubOauthCallbackSerializer, responses={200: dict, 400: dict, 401: dict, 500: dict}, tags=["github-app"])
     def _complete_oauth(self, request, code: str, state: str) -> tuple[dict | None, str | None, int]:
-        if not _validate_signed_oauth_state(state):
+        valid, state_user_id = _validate_signed_oauth_state(state)
+        if not valid:
             return None, "OAuth state invalido.", status.HTTP_400_BAD_REQUEST
 
         if not settings.GITHUB_APP_CLIENT_ID or not settings.GITHUB_APP_CLIENT_SECRET:
@@ -1218,6 +1224,11 @@ class GithubAppOauthCallbackView(APIView):
         token_user = _user_from_bearer_token(request)
         if request.method == "POST" and not token_user:
             return None, "Authorization Bearer requerido para vincular GitHub al usuario actual.", status.HTTP_401_UNAUTHORIZED
+
+        # For GET callbacks (browser redirects), use the user_id embedded in the state JWT
+        # since no Bearer token is available in browser redirects.
+        if not token_user and state_user_id:
+            token_user = UserAccount.objects.filter(id_user=state_user_id).first()
 
         user = token_user
         if not user:
