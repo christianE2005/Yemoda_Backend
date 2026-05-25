@@ -368,15 +368,30 @@ class UserAccountViewSet(viewsets.ModelViewSet):
         user = self.request.user
         if user.is_admin:
             return UserAccount.objects.all()
-        # Non-admins can only access their own account
-        return UserAccount.objects.filter(id_user=user.id_user)
+        # Non-admins: return themselves + users who share a project with them
+        # (needed for the project member picker in the frontend)
+        shared_project_user_ids = (
+            UserAccount.objects
+            .filter(
+                Q(project_memberships__project__members__user=user)
+                | Q(project_memberships__project__created_by=user)
+                | Q(projects_created__members__user=user)
+            )
+            .values_list('id_user', flat=True)
+            .distinct()
+        )
+        return UserAccount.objects.filter(
+            Q(id_user=user.id_user) | Q(id_user__in=shared_project_user_ids)
+        ).distinct()
 
     def get_permissions(self):
-        if self.action in ('list', 'create', 'destroy'):
+        if self.action == 'create':
+            return [IsAdminUser()]
+        if self.action == 'destroy':
             return [IsAdminUser()]
         if self.action in ('update', 'partial_update'):
-            # Admin can update anyone; regular users can only update themselves
             return [IsAuthenticated()]
+        # list and retrieve: any authenticated user
         return [IsAuthenticated()]
 
     def perform_update(self, serializer):

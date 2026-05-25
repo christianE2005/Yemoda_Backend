@@ -115,7 +115,7 @@ class Role(models.Model):
     description = models.TextField(null=True, blank=True)
 
     class Meta:
-        db_table = "role"
+        db_table = "project_role"
 
 
 class ProjectMember(models.Model):
