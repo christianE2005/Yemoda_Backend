@@ -1258,7 +1258,6 @@ class GithubAppOauthCallbackView(APIView):
                 **tokens,
                 "user": UserAccountSerializer(user).data,
                 "github_login": github_login,
-                "authorized_orgs": list(matching_orgs),
             },
             None,
             status.HTTP_200_OK,
