@@ -1280,12 +1280,36 @@ class GithubAppOauthCallbackView(APIView):
     def get(self, request):
         code = request.query_params.get("code")
         state = request.query_params.get("state")
+        installation_id = request.query_params.get("installation_id")
         if not code or not state:
             return HttpResponse("OAuth failed: code/state missing", status=400, content_type="text/plain")
 
         payload, error, status_code = self._complete_oauth(request, code=code, state=state)
         if error:
             return HttpResponse(f"OAuth failed: {error}", status=status_code, content_type="text/plain")
+
+        # If installation_id is present (from the App installation+OAuth combined flow),
+        # save it so the user's personal installation is linked to their account.
+        if installation_id:
+            try:
+                inst_id_int = int(installation_id)
+                user_data = payload.get("user", {})
+                user_id = user_data.get("id_user") if isinstance(user_data, dict) else None
+                if user_id:
+                    user_obj = UserAccount.objects.filter(id_user=user_id).first()
+                    if user_obj:
+                        github_login = payload.get("github_login", "")
+                        GithubAppInstallation.objects.update_or_create(
+                            installation_id=inst_id_int,
+                            defaults={
+                                "user": user_obj,
+                                "account_login": github_login,
+                                "account_type": "User",
+                            },
+                        )
+            except (ValueError, TypeError):
+                pass
+
         return HttpResponse("OAuth completed successfully", status=200, content_type="text/plain")
 
     def post(self, request):
