@@ -54,6 +54,7 @@ from apps.core.views import (
     GoogleOauthStartView,
     VerifyEmailView,
     StripeWebhookView,
+    CancelSubscriptionView,
 )
 
 router = DefaultRouter()
@@ -115,5 +116,6 @@ urlpatterns = [
     path("api/projects/<int:project_id>/repos/<int:repo_id>/", ProjectRepoDetailView.as_view(), name="project-repo-detail"),
     path("api/", include(router.urls)),
     path("api/payments/create-checkout-session/", CreateCheckoutSessionView.as_view(), name="create-checkout-session"),
+    path("api/payments/cancel/", CancelSubscriptionView.as_view(), name="cancel-subscription"),
     path("api/payments/webhook/", StripeWebhookView.as_view(), name="stripe-webhook"),
 ]

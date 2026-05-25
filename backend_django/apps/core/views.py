@@ -2735,16 +2735,92 @@ class StripeWebhookView(APIView):
 
             user = payment.user
             user.is_premium = True
+            # Guardar IDs de Stripe en el usuario para poder cancelar/gestionar después
+            stripe_customer_id = session_data.get("customer")
+            stripe_subscription_id = session_data.get("subscription")
+            if stripe_customer_id:
+                user.stripe_customer_id = stripe_customer_id
+            if stripe_subscription_id:
+                user.stripe_subscription_id = stripe_subscription_id
             # Solo actualizar el plan si es un upgrade o primer plan
             current_rank = _PLAN_RANK.get(user.subscription_plan, 0)
             new_rank = _PLAN_RANK.get(plan_from_meta, 0)
+            update_fields = ["is_premium", "stripe_customer_id", "stripe_subscription_id"]
             if new_rank > current_rank:
                 user.subscription_plan = plan_from_meta
-                user.save(update_fields=["is_premium", "subscription_plan"])
-            else:
-                user.save(update_fields=["is_premium"])
+                update_fields.append("subscription_plan")
+            user.save(update_fields=update_fields)
+
+        elif event["type"] == "customer.subscription.deleted":
+            # Stripe confirma la cancelación efectiva (al final del período o inmediata)
+            sub_data = event["data"]["object"]
+            stripe_sub_id = sub_data.get("id")
+            if stripe_sub_id:
+                from apps.core.models import UserAccount as _UserAccount
+                affected = _UserAccount.objects.filter(stripe_subscription_id=stripe_sub_id)
+                affected.update(
+                    is_premium=False,
+                    subscription_plan=None,
+                    stripe_subscription_id=None,
+                )
 
         return Response(status=status.HTTP_200_OK)
+
+
+class CancelSubscriptionView(APIView):
+    @extend_schema(
+        request=None,
+        responses={
+            200: {
+                "type": "object",
+                "properties": {
+                    "detail": {"type": "string"},
+                    "cancel_at_period_end": {"type": "boolean"},
+                    "current_period_end": {"type": "integer", "nullable": True},
+                },
+            },
+            400: dict,
+            404: dict,
+            502: dict,
+        },
+        tags=["payments"],
+        summary="Cancelar suscripción activa",
+        description=(
+            "Marca la suscripción de Stripe para cancelarse al final del período de facturación "
+            "actual. El usuario conserva acceso premium hasta esa fecha; "
+            "el webhook 'customer.subscription.deleted' revocará el acceso automáticamente."
+        ),
+    )
+    def post(self, request):
+        import stripe
+        stripe.api_key = settings.STRIPE_SECRET_KEY
+
+        user = request.user
+
+        if not user.is_premium or not user.stripe_subscription_id:
+            return Response(
+                {"detail": "No tienes una suscripción activa para cancelar."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            subscription = stripe.Subscription.modify(
+                user.stripe_subscription_id,
+                cancel_at_period_end=True,
+            )
+        except stripe.error.InvalidRequestError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_404_NOT_FOUND)
+        except stripe.StripeError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
+
+        return Response(
+            {
+                "detail": "Tu suscripción se cancelará al final del período actual.",
+                "cancel_at_period_end": subscription.cancel_at_period_end,
+                "current_period_end": subscription.current_period_end,
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 class GithubAppDebugView(APIView):

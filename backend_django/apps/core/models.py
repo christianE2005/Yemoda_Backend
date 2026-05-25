@@ -22,6 +22,18 @@ class UserAccount(models.Model):
         blank=True,
         help_text="Active subscription tier: 'monthly' or 'annual'. Null means free tier.",
     )
+    stripe_subscription_id = models.CharField(
+        max_length=255,
+        null=True,
+        blank=True,
+        help_text="Stripe subscription ID (sub_xxx). Required to cancel/modify subscription.",
+    )
+    stripe_customer_id = models.CharField(
+        max_length=255,
+        null=True,
+        blank=True,
+        help_text="Stripe customer ID (cus_xxx).",
+    )
     is_email_verified = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
 
