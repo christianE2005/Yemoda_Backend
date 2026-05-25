@@ -1254,7 +1254,14 @@ class GithubAppOauthCallbackView(APIView):
 
         existing_connection = GithubConnection.objects.filter(github_user_id=github_user_id).first()
         if existing_connection and existing_connection.user_id != user.id_user:
-            return None, "Esta cuenta de GitHub ya esta vinculada con otro usuario.", status.HTTP_400_BAD_REQUEST
+            if state_user_id and user.id_user == state_user_id:
+                # The current user is explicitly authenticated via the state JWT and just
+                # completed GitHub OAuth for this account — they own it. Re-assign the
+                # connection (the old link was likely a ghost account from a prior attempt).
+                existing_connection.user_id = user.id_user
+                existing_connection.save(update_fields=["user_id"])
+            else:
+                return None, "Esta cuenta de GitHub ya esta vinculada con otro usuario.", status.HTTP_400_BAD_REQUEST
 
         token_data = token_resp_json
         now = datetime.now(timezone.utc)
@@ -2826,10 +2833,16 @@ class GithubAppDebugView(APIView):
 
     def get(self, request):
         import traceback
+        pk = settings.GITHUB_APP_PRIVATE_KEY or ""
+        lines = pk.splitlines()
         result = {
             "github_app_id": settings.GITHUB_APP_ID or "(not set)",
-            "private_key_length": len(settings.GITHUB_APP_PRIVATE_KEY),
-            "private_key_starts_with": settings.GITHUB_APP_PRIVATE_KEY[:40] if settings.GITHUB_APP_PRIVATE_KEY else "(empty)",
+            "private_key_length": len(pk),
+            "private_key_line_count": len(lines),
+            "private_key_first_line": lines[0] if lines else "(empty)",
+            "private_key_last_line": lines[-1] if lines else "(empty)",
+            "has_begin_header": "-----BEGIN RSA PRIVATE KEY-----" in pk or "-----BEGIN PRIVATE KEY-----" in pk,
+            "has_end_footer": "-----END RSA PRIVATE KEY-----" in pk or "-----END PRIVATE KEY-----" in pk,
             "jwt_ok": False,
             "jwt_error": None,
         }

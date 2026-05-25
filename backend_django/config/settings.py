@@ -182,11 +182,19 @@ GITHUB_APP_CLIENT_ID = os.getenv("GITHUB_APP_CLIENT_ID", "")
 GITHUB_APP_CLIENT_SECRET = os.getenv("GITHUB_APP_CLIENT_SECRET", "")
 GITHUB_APP_OAUTH_CALLBACK_URL = os.getenv("GITHUB_APP_OAUTH_CALLBACK_URL", "")
 _raw_private_key = os.getenv("GITHUB_APP_PRIVATE_KEY", "")
-# Handle Railway-style escaped newlines AND multiline values
+# Normalize the private key regardless of how Railway stores it:
+# 1. Replace literal \n (escaped) with real newlines
 if "\\n" in _raw_private_key:
     _raw_private_key = _raw_private_key.replace("\\n", "\n")
-# Strip surrounding quotes that some env systems add
-_raw_private_key = _raw_private_key.strip('"').strip("'")
+# 2. Strip surrounding quotes that some env systems add
+_raw_private_key = _raw_private_key.strip('"').strip("'").strip()
+# 3. Normalize Windows line endings and remove carriage returns
+_raw_private_key = _raw_private_key.replace("\r\n", "\n").replace("\r", "\n")
+# 4. Rebuild PEM: strip each line and re-join to remove stray spaces/tabs
+if "BEGIN" in _raw_private_key:
+    _lines = [line.strip() for line in _raw_private_key.splitlines()]
+    _lines = [line for line in _lines if line]  # remove blank lines
+    _raw_private_key = "\n".join(_lines) + "\n"
 GITHUB_APP_PRIVATE_KEY = _raw_private_key
 GITHUB_APP_WEBHOOK_SECRET = os.getenv("GITHUB_APP_WEBHOOK_SECRET", "")
 GITHUB_APP_WEBHOOK_TARGET_URL = os.getenv("GITHUB_APP_WEBHOOK_TARGET_URL", "")
