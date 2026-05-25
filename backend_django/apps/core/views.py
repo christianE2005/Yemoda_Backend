@@ -2618,12 +2618,46 @@ class HealthCheckView(APIView):
         return Response({"status": "ok"}, status=status.HTTP_200_OK)
 
 
+# Jerarquía de planes: valores más altos indican mayor nivel.
+_PLAN_RANK = {"monthly": 1, "annual": 2}
+
+
 class CreateCheckoutSessionView(APIView):
     def post(self, request):
         import stripe
         stripe.api_key = settings.STRIPE_SECRET_KEY
 
-        plan = request.data.get("plan", "monthly")
+        plan = (request.data.get("plan") or "monthly").strip().lower()
+        if plan not in _PLAN_RANK:
+            return Response(
+                {"detail": "Plan inválido. Usa 'monthly' o 'annual'."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        user = request.user
+        current_plan = user.subscription_plan  # None, 'monthly' o 'annual'
+
+        if current_plan is not None:
+            current_rank = _PLAN_RANK.get(current_plan, 0)
+            requested_rank = _PLAN_RANK[plan]
+
+            if requested_rank <= current_rank:
+                # Mismo nivel o downgrade: no permitido
+                msg = (
+                    f"Ya tienes el plan '{current_plan}' activo."
+                    if requested_rank == current_rank
+                    else f"No puedes pasar del plan '{current_plan}' a '{plan}' (downgrade no permitido)."
+                )
+                return Response(
+                    {
+                        "detail": msg,
+                        "current_plan": current_plan,
+                        "requested_plan": plan,
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
+            # requested_rank > current_rank → upgrade permitido
+
         if plan == "annual":
             price_id = settings.STRIPE_PRICE_ID_ANNUAL
         else:
@@ -2641,15 +2675,16 @@ class CreateCheckoutSessionView(APIView):
                 mode="subscription",
                 success_url=settings.STRIPE_SUCCESS_URL,
                 cancel_url=settings.STRIPE_CANCEL_URL,
-                customer_email=request.user.email,
-                metadata={"user_id": str(request.user.id_user)},
+                customer_email=user.email,
+                metadata={"user_id": str(user.id_user), "plan": plan},
             )
         except stripe.StripeError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
 
         StripePayment.objects.create(
-            user=request.user,
+            user=user,
             checkout_session_id=session.id,
+            plan=plan,
             status=StripePayment.PENDING,
         )
 
@@ -2690,10 +2725,24 @@ class StripeWebhookView(APIView):
             payment.amount_total = session_data.get("amount_total")
             payment.currency = session_data.get("currency")
             payment.completed_at = timezone.now()
+
+            # Persistir el plan desde metadata (fuente de verdad: la sesión de Stripe)
+            plan_from_meta = (session_data.get("metadata") or {}).get("plan") or payment.plan
+            if plan_from_meta in ("monthly", "annual"):
+                payment.plan = plan_from_meta
+
             payment.save()
 
-            payment.user.is_premium = True
-            payment.user.save(update_fields=["is_premium"])
+            user = payment.user
+            user.is_premium = True
+            # Solo actualizar el plan si es un upgrade o primer plan
+            current_rank = _PLAN_RANK.get(user.subscription_plan, 0)
+            new_rank = _PLAN_RANK.get(plan_from_meta, 0)
+            if new_rank > current_rank:
+                user.subscription_plan = plan_from_meta
+                user.save(update_fields=["is_premium", "subscription_plan"])
+            else:
+                user.save(update_fields=["is_premium"])
 
         return Response(status=status.HTTP_200_OK)
 

@@ -2,12 +2,26 @@ from django.db import models
 
 
 class UserAccount(models.Model):
+    PLAN_MONTHLY = "monthly"
+    PLAN_ANNUAL = "annual"
+    PLAN_CHOICES = [
+        (PLAN_MONTHLY, "Monthly"),
+        (PLAN_ANNUAL, "Annual"),
+    ]
+
     id_user = models.BigAutoField(primary_key=True)
     email = models.EmailField(max_length=150, unique=True)
     username = models.CharField(max_length=100)
     password_hash = models.CharField(max_length=255)
     is_admin = models.BooleanField(default=False)
     is_premium = models.BooleanField(default=False)
+    subscription_plan = models.CharField(
+        max_length=20,
+        choices=PLAN_CHOICES,
+        null=True,
+        blank=True,
+        help_text="Active subscription tier: 'monthly' or 'annual'. Null means free tier.",
+    )
     is_email_verified = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -663,6 +677,7 @@ class StripePayment(models.Model):
         related_name="stripe_payments",
     )
     checkout_session_id = models.CharField(max_length=255, unique=True)
+    plan = models.CharField(max_length=20, null=True, blank=True, help_text="'monthly' or 'annual'")
     stripe_customer_id = models.CharField(max_length=255, null=True, blank=True)
     amount_total = models.IntegerField(null=True, blank=True, help_text="Amount in cents")
     currency = models.CharField(max_length=10, null=True, blank=True)

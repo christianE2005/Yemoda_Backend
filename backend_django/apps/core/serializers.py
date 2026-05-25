@@ -30,11 +30,12 @@ class UserAccountSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True, required=False, min_length=8)
     is_admin = serializers.BooleanField(read_only=True)
     is_premium = serializers.BooleanField(read_only=True)
+    subscription_plan = serializers.CharField(read_only=True, allow_null=True)
     is_email_verified = serializers.BooleanField(read_only=True)
 
     class Meta:
         model = UserAccount
-        fields = ["id_user", "email", "username", "password", "is_admin", "is_premium", "is_email_verified", "created_at"]
+        fields = ["id_user", "email", "username", "password", "is_admin", "is_premium", "subscription_plan", "is_email_verified", "created_at"]
 
     def create(self, validated_data):
         password = validated_data.pop("password", None)
