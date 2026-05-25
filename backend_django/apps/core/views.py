@@ -2551,16 +2551,25 @@ class TaskCreateBranchView(APIView):
 
         org_login = repo_full_name.split("/")[0]
         installation = GithubAppInstallation.objects.filter(account_login__iexact=org_login).first()
-        if not installation:
-            return Response(
-                {"detail": f"No se encontró instalación de GitHub App para '{org_login}'."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
 
-        try:
-            token = _installation_access_token(installation.installation_id)
-        except Exception as exc:
-            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        token = None
+        if installation:
+            try:
+                token = _installation_access_token(installation.installation_id)
+            except Exception:
+                token = None  # fall through to user OAuth token
+
+        if not token:
+            # Fallback: use the requesting user's OAuth token (covers personal repos
+            # where no installation exists or the installation_id is stale).
+            github_connection = GithubConnection.objects.filter(user=user).first()
+            if github_connection:
+                token = _get_valid_github_token(github_connection)
+            if not token:
+                return Response(
+                    {"detail": f"No se encontró instalación de GitHub App para '{org_login}' ni token OAuth del usuario. Conecta tu cuenta de GitHub."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
         headers = _github_headers(token)
 
