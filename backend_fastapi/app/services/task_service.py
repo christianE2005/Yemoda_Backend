@@ -11,14 +11,20 @@ logger = logging.getLogger(__name__)
 
 
 def get_project_by_repo(db: Session, repo_full_name: str) -> Project | None:
+    # Try project_repo table first
     project_repo = (
         db.query(ProjectRepo)
         .filter(func.lower(ProjectRepo.repo_full_name) == repo_full_name.lower())
         .first()
     )
-    if not project_repo:
-        return None
-    return db.query(Project).filter(Project.id_project == project_repo.id_project).first()
+    if project_repo:
+        return db.query(Project).filter(Project.id_project == project_repo.id_project).first()
+    # Fallback: check Project.github_repo_full_name directly
+    return (
+        db.query(Project)
+        .filter(func.lower(Project.github_repo_full_name) == repo_full_name.lower())
+        .first()
+    )
 
 
 def get_board_coding_style(db: Session, project_id: int) -> str:
