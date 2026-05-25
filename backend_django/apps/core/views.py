@@ -1153,7 +1153,7 @@ class GithubAppOauthStartView(APIView):
             "client_id": settings.GITHUB_APP_CLIENT_ID,
             "redirect_uri": settings.GITHUB_APP_OAUTH_CALLBACK_URL,
             "state": state,
-            "scope": "read:org",
+            "scope": "repo,read:user,read:org",
         }
         authorize_url = f"https://github.com/login/oauth/authorize?{urlencode(params)}"
         return Response({"authorize_url": authorize_url, "state": state}, status=status.HTTP_200_OK)
