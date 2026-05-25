@@ -1159,7 +1159,9 @@ class GithubAppOauthStartView(APIView):
             "client_id": settings.GITHUB_APP_CLIENT_ID,
             "redirect_uri": settings.GITHUB_APP_OAUTH_CALLBACK_URL,
             "state": state,
-            "scope": "repo,read:user,read:org",
+            # Note: GitHub Apps ignore the 'scope' parameter.
+            # Permissions are controlled via the GitHub App settings on github.com
+            # (User permissions → Administration: Read & Write for repo creation).
         }
         authorize_url = f"https://github.com/login/oauth/authorize?{urlencode(params)}"
         return Response({"authorize_url": authorize_url, "state": state}, status=status.HTTP_200_OK)
@@ -1439,8 +1441,12 @@ class GithubCreateRepoView(APIView):
         }
         repo_response = requests.post(create_url, headers=auth_headers, json=create_repo_payload, timeout=20)
         if repo_response.status_code >= 400:
+            try:
+                gh_error = repo_response.json().get("message", repo_response.text)
+            except Exception:
+                gh_error = repo_response.text
             return Response(
-                {"detail": "No se pudo crear el repositorio.", "github_response": repo_response.text},
+                {"detail": f"GitHub: {gh_error}"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
