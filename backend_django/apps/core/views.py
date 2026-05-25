@@ -1278,15 +1278,17 @@ class GithubAppOauthCallbackView(APIView):
         )
 
     def get(self, request):
+        frontend_redirect = settings.GITHUB_AUTH_FRONTEND_REDIRECT
         code = request.query_params.get("code")
         state = request.query_params.get("state")
         installation_id = request.query_params.get("installation_id")
+
         if not code or not state:
-            return HttpResponse("OAuth failed: code/state missing", status=400, content_type="text/plain")
+            return HttpResponseRedirect(f"{frontend_redirect}?error=missing_code_or_state")
 
         payload, error, status_code = self._complete_oauth(request, code=code, state=state)
         if error:
-            return HttpResponse(f"OAuth failed: {error}", status=status_code, content_type="text/plain")
+            return HttpResponseRedirect(f"{frontend_redirect}?error={urlencode({'msg': error})}")
 
         # If installation_id is present (from the App installation+OAuth combined flow),
         # save it so the user's personal installation is linked to their account.
@@ -1310,7 +1312,13 @@ class GithubAppOauthCallbackView(APIView):
             except (ValueError, TypeError):
                 pass
 
-        return HttpResponse("OAuth completed successfully", status=200, content_type="text/plain")
+        redirect_url = (
+            f"{frontend_redirect}"
+            f"?access_token={payload['access_token']}"
+            f"&refresh_token={payload['refresh_token']}"
+            f"&expires_at={payload['expires_at']}"
+        )
+        return HttpResponseRedirect(redirect_url)
 
     def post(self, request):
         serializer = GithubOauthCallbackSerializer(data=request.data)

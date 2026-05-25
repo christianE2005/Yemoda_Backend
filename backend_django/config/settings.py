@@ -206,6 +206,7 @@ GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
 GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", "")
 GOOGLE_AUTH_FRONTEND_REDIRECT = os.getenv("GOOGLE_AUTH_FRONTEND_REDIRECT", "https://yemoda.site/auth/google/callback")
+GITHUB_AUTH_FRONTEND_REDIRECT = os.getenv("GITHUB_AUTH_FRONTEND_REDIRECT", "https://yemoda.site/auth/github/callback")
 GOOGLE_STATE_SECRET = os.getenv("GOOGLE_STATE_SECRET", JWT_SECRET_KEY)
 
 # Resend (email)
