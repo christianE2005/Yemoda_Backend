@@ -528,6 +528,9 @@ class ProjectMemberViewSet(viewsets.ModelViewSet):
         if project.created_by != user and instance.user != user:
             raise PermissionDenied("Solo puedes salirte del proyecto, no eliminar a otros miembros.")
         instance.delete()
+
+
+class ProjectMembersView(APIView):
     @extend_schema(
         request={"application/json": {"type": "object", "properties": {
             "user_id": {"type": "integer"},
