@@ -1795,6 +1795,11 @@ class GithubDeleteRepoView(APIView):
             return Response({"detail": "Repositorio no encontrado."}, status=status.HTTP_404_NOT_FOUND)
         if repo.user_id != request.user.id_user:
             return Response({"detail": "No tienes permiso para desvincular este repositorio."}, status=status.HTTP_403_FORBIDDEN)
+        # Remove the ProjectRepo entry so future member invitations skip this repo
+        if repo.project_id:
+            ProjectRepo.objects.filter(project_id=repo.project_id, repo_full_name=repo.full_name).delete()
+            # Clear the project's primary repo field if it points to this repo
+            Project.objects.filter(id_project=repo.project_id, github_repo_full_name=repo.full_name).update(github_repo_full_name=None)
         repo.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
