@@ -2760,6 +2760,8 @@ class TaskCreateBranchView(APIView):
         if not base_branch:
             return Response({"detail": "base_branch es requerido."}, status=status.HTTP_400_BAD_REQUEST)
 
+        requested_repo = (request.data.get("repo_full_name") or "").strip()
+
         user = request.user
         task = Task.objects.select_related("project").filter(pk=task_id).first()
         if not task:
@@ -2773,13 +2775,29 @@ class TaskCreateBranchView(APIView):
         if not has_access:
             return Response({"detail": "No tienes acceso a este proyecto."}, status=status.HTTP_403_FORBIDDEN)
 
-        project_repo = ProjectRepo.objects.filter(project=project).first()
-        repo_full_name = (project_repo.repo_full_name if project_repo else None) or project.github_repo_full_name
-        if not repo_full_name:
+        project_repos = list(
+            ProjectRepo.objects.filter(project=project).values_list("repo_full_name", flat=True)
+        )
+        if not project_repos:
             return Response(
-                {"detail": "El proyecto no tiene un repositorio de GitHub vinculado."},
+                {"detail": "El proyecto no tiene repositorios de GitHub vinculados."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+
+        if requested_repo:
+            if requested_repo not in project_repos:
+                return Response(
+                    {"detail": "No tienes permiso para crear branches en ese repositorio."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+            repo_full_name = requested_repo
+        else:
+            if len(project_repos) > 1:
+                return Response(
+                    {"detail": "El proyecto tiene varios repositorios vinculados. Especifica repo_full_name."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            repo_full_name = project_repos[0]
 
         org_login = repo_full_name.split("/")[0]
         installation = GithubAppInstallation.objects.filter(account_login__iexact=org_login).first()
