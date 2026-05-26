@@ -16,8 +16,9 @@ from django.db import models
 from django.db.models import Q
 from drf_spectacular.utils import extend_schema
 from rest_framework import status, viewsets
-from rest_framework.exceptions import ValidationError
-from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.decorators import action
+from rest_framework.exceptions import ValidationError, PermissionDenied
+from rest_framework.permissions import AllowAny, IsAuthenticated, IsAdminUser
 from .authentication import IsAdminUser
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
@@ -319,6 +320,14 @@ def _send_verification_email(user: "UserAccount") -> None:
       <p style="color:#666;font-size:12px">Si no creaste esta cuenta, puedes ignorar este correo.</p>
     </div>
     """
+    text_body = (
+        f"Hola {user.username},\n\n"
+        "Gracias por registrarte en Yemoda. Por favor verifica tu correo haciendo clic en el siguiente enlace:\n\n"
+        f"{verify_link}\n\n"
+        "El enlace expira en 24 horas.\n\n"
+        "Si no creaste esta cuenta, puedes ignorar este correo.\n\n"
+        "— El equipo de Yemoda"
+    )
     requests.post(
         "https://api.resend.com/emails",
         headers={
@@ -330,6 +339,7 @@ def _send_verification_email(user: "UserAccount") -> None:
             "to": [user.email],
             "subject": "Verifica tu correo — Yemoda",
             "html": html_body,
+            "text": text_body,
         },
         timeout=10,
     )
@@ -371,6 +381,16 @@ class UserAccountViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
+        search = self.request.query_params.get('search', '').strip()
+
+        if search and len(search) >= 3:
+            # With a search term, allow finding any non-admin user by username or email
+            # (needed to add new members who don't yet share a project)
+            return UserAccount.objects.filter(
+                Q(username__icontains=search) | Q(email__icontains=search),
+                is_admin=False,
+            ).exclude(id_user=user.id_user).distinct()[:20]
+
         if user.is_admin:
             return UserAccount.objects.all()
         # Non-admins: return themselves + users who share a project with them
@@ -402,7 +422,6 @@ class UserAccountViewSet(viewsets.ModelViewSet):
     def perform_update(self, serializer):
         user = self.request.user
         if not user.is_admin and serializer.instance.pk != user.id_user:
-            from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied("Solo puedes editar tu propio perfil.")
         serializer.save()
 
@@ -438,6 +457,16 @@ class ProjectViewSet(viewsets.ModelViewSet):
         except Exception:
             pass
 
+    def perform_update(self, serializer):
+        if serializer.instance.created_by != self.request.user:
+            raise PermissionDenied("Solo el creador puede modificar el proyecto.")
+        serializer.save()
+
+    def perform_destroy(self, instance):
+        if instance.created_by != self.request.user:
+            raise PermissionDenied("Solo el creador puede eliminar el proyecto.")
+        instance.delete()
+
 
 class RoleViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = Role.objects.all()
@@ -453,6 +482,8 @@ class ProjectMemberViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         project = serializer.validated_data.get('project')
         user = serializer.validated_data.get('user')
+        if project and project.created_by != self.request.user:
+            raise PermissionDenied("Solo el creador del proyecto puede agregar miembros.")
         if project and user and project.created_by_id == user.pk:
             raise ValidationError("El creador del proyecto ya es miembro por defecto.")
         member = serializer.save()
@@ -487,8 +518,16 @@ class ProjectMemberViewSet(viewsets.ModelViewSet):
 
         return qs.distinct()
 
-
-class ProjectMembersView(APIView):
+    def perform_destroy(self, instance):
+        user = self.request.user
+        project = instance.project
+        # Prevent removing the project creator
+        if instance.user == project.created_by:
+            raise PermissionDenied("El creador del proyecto no puede ser removido.")
+        # Creator can remove anyone; members can only remove themselves (leave)
+        if project.created_by != user and instance.user != user:
+            raise PermissionDenied("Solo puedes salirte del proyecto, no eliminar a otros miembros.")
+        instance.delete()
     @extend_schema(
         request={"application/json": {"type": "object", "properties": {
             "user_id": {"type": "integer"},
@@ -498,15 +537,13 @@ class ProjectMembersView(APIView):
         tags=["projects"],
     )
     def post(self, request, project_id):
-        """Añade un usuario a un proyecto."""
+        """Añade un usuario a un proyecto. Solo el creador puede agregar miembros."""
         project = Project.objects.filter(pk=project_id).first()
         if not project:
             return Response({"detail": "Proyecto no encontrado."}, status=status.HTTP_404_NOT_FOUND)
 
         if project.created_by != request.user:
-            user_projects = Project.objects.filter(members__user=request.user).values_list('id_project', flat=True)
-            if project_id not in user_projects:
-                return Response({"detail": "No tienes acceso a este proyecto."}, status=status.HTTP_403_FORBIDDEN)
+            return Response({"detail": "Solo el creador del proyecto puede agregar miembros."}, status=status.HTTP_403_FORBIDDEN)
 
         user_id = request.data.get("user_id")
         if not user_id:
@@ -577,6 +614,12 @@ class BoardViewSet(viewsets.ModelViewSet):
     queryset = Board.objects.all()
     serializer_class = BoardSerializer
 
+    def get_throttles(self):
+        if self.action == 'create':
+            self.throttle_scope = 'board_create'
+            return [ScopedRateThrottle()]
+        return super().get_throttles()
+
     def get_queryset(self):
         user = self.request.user
         user_project_ids = Project.objects.filter(
@@ -587,6 +630,16 @@ class BoardViewSet(viewsets.ModelViewSet):
         if project_id is not None:
             qs = qs.filter(project_id=project_id)
         return qs
+
+    def perform_update(self, serializer):
+        if serializer.instance.project.created_by != self.request.user:
+            raise PermissionDenied("Solo el creador puede modificar la configuración del board.")
+        serializer.save()
+
+    def perform_destroy(self, instance):
+        if instance.project.created_by != self.request.user:
+            raise PermissionDenied("Solo el creador puede eliminar boards.")
+        instance.delete()
 
 
 class BoardColumnViewSet(viewsets.ModelViewSet):
@@ -617,10 +670,53 @@ class BoardColumnViewSet(viewsets.ModelViewSet):
         instance = serializer.save()
         self._enforce_single_review(instance)
 
+    def perform_destroy(self, instance):
+        if instance.board.project.created_by != self.request.user:
+            raise PermissionDenied("Solo el creador puede eliminar columnas del board.")
+        instance.delete()
+
+    @action(detail=False, methods=['post'], url_path='reorder')
+    def reorder(self, request):
+        """Reorder board columns atomically.
+        Body: [{"id_column": 1, "order": 0}, {"id_column": 2, "order": 1}, ...]
+        """
+        items = request.data
+        if not isinstance(items, list):
+            return Response({"detail": "Se esperaba una lista de {id_column, order}."}, status=status.HTTP_400_BAD_REQUEST)
+
+        user = request.user
+        user_project_ids = Project.objects.filter(
+            Q(members__user=user) | Q(created_by=user)
+        ).values_list('id_project', flat=True)
+
+        column_ids = [item.get('id_column') for item in items if item.get('id_column') is not None]
+        accessible = set(
+            BoardColumn.objects.filter(
+                id_column__in=column_ids,
+                board__project_id__in=user_project_ids,
+            ).values_list('id_column', flat=True)
+        )
+        if set(column_ids) - accessible:
+            return Response({"detail": "Algunas columnas no son accesibles."}, status=status.HTTP_403_FORBIDDEN)
+
+        for item in items:
+            col_id = item.get('id_column')
+            order = item.get('order')
+            if col_id is not None and order is not None:
+                BoardColumn.objects.filter(id_column=col_id).update(order=order)
+
+        return Response({"detail": "Orden actualizado."}, status=status.HTTP_200_OK)
+
 
 class SprintViewSet(viewsets.ModelViewSet):
     queryset = Sprint.objects.all()
     serializer_class = SprintSerializer
+
+    def get_throttles(self):
+        if self.action == 'create':
+            self.throttle_scope = 'sprint_create'
+            return [ScopedRateThrottle()]
+        return super().get_throttles()
 
     def get_queryset(self):
         user = self.request.user
@@ -641,6 +737,12 @@ class MilestoneViewSet(viewsets.ModelViewSet):
     queryset = Milestone.objects.all()
     serializer_class = MilestoneSerializer
 
+    def get_throttles(self):
+        if self.action == 'create':
+            self.throttle_scope = 'milestone_create'
+            return [ScopedRateThrottle()]
+        return super().get_throttles()
+
     def get_queryset(self):
         user = self.request.user
         user_project_ids = Project.objects.filter(
@@ -651,6 +753,11 @@ class MilestoneViewSet(viewsets.ModelViewSet):
         if project_id is not None:
             qs = qs.filter(project_id=project_id)
         return qs
+
+    def perform_destroy(self, instance):
+        if instance.project.created_by != self.request.user:
+            raise PermissionDenied("Solo el creador puede eliminar milestones.")
+        instance.delete()
 
 
 class TagViewSet(viewsets.ModelViewSet):
@@ -667,6 +774,11 @@ class TagViewSet(viewsets.ModelViewSet):
         if project_id is not None:
             qs = qs.filter(project_id=project_id)
         return qs
+
+    def perform_destroy(self, instance):
+        if instance.project.created_by != self.request.user:
+            raise PermissionDenied("Solo el creador puede eliminar etiquetas.")
+        instance.delete()
 
 
 class TaskStatusViewSet(viewsets.ModelViewSet):
@@ -692,6 +804,12 @@ class TaskPriorityViewSet(viewsets.ModelViewSet):
 class TaskViewSet(viewsets.ModelViewSet):
     queryset = Task.objects.all()
     serializer_class = TaskSerializer
+
+    def get_throttles(self):
+        if self.action == 'create':
+            self.throttle_scope = 'task_create'
+            return [ScopedRateThrottle()]
+        return super().get_throttles()
 
     def get_queryset(self):
         """
@@ -720,10 +838,9 @@ class TaskViewSet(viewsets.ModelViewSet):
         if milestone_id is not None:
             qs = qs.filter(milestone_id=milestone_id)
 
-        # ?backlog=true returns only tasks with no sprint assigned (backlog)
-        backlog = self.request.query_params.get('backlog')
-        if backlog is not None and backlog.lower() == 'true':
-            qs = qs.filter(sprint__isnull=True)
+        # ?backlog=true returns all tasks of the project regardless of sprint assignment
+        # (Product Backlog = all tasks; sprint tasks are still part of the backlog)
+
 
         tag_id = self.request.query_params.get('tag')
         if tag_id is not None:
@@ -746,6 +863,19 @@ class TaskCommentViewSet(viewsets.ModelViewSet):
         if task_id is not None:
             qs = qs.filter(task_id=task_id)
         return qs
+
+    def perform_update(self, serializer):
+        user = self.request.user
+        comment = serializer.instance
+        if comment.user != user and comment.task.project.created_by != user:
+            raise PermissionDenied("Solo puedes editar tus propios comentarios.")
+        serializer.save()
+
+    def perform_destroy(self, instance):
+        user = self.request.user
+        if instance.user != user and instance.task.project.created_by != user:
+            raise PermissionDenied("Solo puedes eliminar tus propios comentarios.")
+        instance.delete()
 
 
 class TaskAssignmentViewSet(viewsets.ModelViewSet):
@@ -1947,6 +2077,28 @@ class TaskWarningListView(APIView):
         serializer = TaskWarningSerializer(qs[:100], many=True)
         return Response(serializer.data)
 
+    @extend_schema(
+        request={"application/json": {"type": "object", "properties": {"ids": {"type": "array", "items": {"type": "integer"}}}, "required": ["ids"]}},
+        responses={200: dict},
+        tags=["warnings"],
+    )
+    def delete(self, request):
+        """Bulk delete warnings by ID list. Body: {\"ids\": [1, 2, 3]}"""
+        ids = request.data.get("ids", [])
+        if not ids or not isinstance(ids, list):
+            return Response({"detail": "ids es requerido y debe ser una lista."}, status=status.HTTP_400_BAD_REQUEST)
+
+        user = request.user
+        user_project_ids = Project.objects.filter(
+            Q(created_by=user) | Q(members__user=user)
+        ).distinct().values_list("id_project", flat=True)
+
+        deleted_count, _ = TaskWarning.objects.filter(
+            pk__in=ids,
+            task__project_id__in=user_project_ids,
+        ).delete()
+        return Response({"deleted": deleted_count}, status=status.HTTP_200_OK)
+
 
 class TaskWarningDetailView(APIView):
     @extend_schema(responses={204: None, 403: dict, 404: dict}, tags=["warnings"])
@@ -2836,9 +2988,8 @@ class CancelSubscriptionView(APIView):
 
 
 class GithubAppDebugView(APIView):
-    """Temporary debug endpoint — remove after fixing private key issue."""
-    authentication_classes = []
-    permission_classes = []
+    """Debug endpoint for GitHub App private key — admin only."""
+    permission_classes = [IsAdminUser]
 
     def get(self, request):
         import traceback

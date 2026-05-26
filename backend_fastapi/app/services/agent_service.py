@@ -27,7 +27,7 @@ _STYLE_INSTRUCTIONS: dict[str, str] = {
         "**Injection attacks**: SQL/NoSQL/LDAP/OS command injection via string formatting instead of "
         "parameterized queries, ORMs, or safe APIs. Flag any query or shell call built with user input.\n\n"
         "**Authentication & secrets**: Hardcoded credentials, API keys, tokens or passwords anywhere in "
-        "source code. Secrets loaded without environment isolation. Weak JWT handling (alg:none, "
+        "source code.   Secrets loaded without environment isolation. Weak JWT handling (alg:none, "
         "missing expiry, symmetric secret in code). Missing auth on endpoints.\n\n"
         "**XSS & CSRF**: Unescaped user content rendered as HTML. Missing CSRF tokens on state-changing "
         "requests. Unsafe use of innerHTML, dangerouslySetInnerHTML, v-html, [innerHTML] binding.\n\n"

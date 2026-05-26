@@ -152,6 +152,11 @@ REST_FRAMEWORK = {
         "github_repo_create": "10/minute",
         "github_repo_contents": "60/minute",
         "resend_verification": "3/hour",
+        # Resource creation limits
+        "sprint_create": "20/hour",
+        "milestone_create": "20/hour",
+        "task_create": "60/hour",
+        "board_create": "10/hour",
     },
 }
 
@@ -224,3 +229,15 @@ RESEND_FROM_EMAIL = os.getenv("RESEND_FROM_EMAIL", "noreply@yemoda.site")
 EMAIL_VERIFICATION_BASE_URL = os.getenv("EMAIL_VERIFICATION_BASE_URL", "https://yemoda.site/api/auth/verify-email/")
 # Frontend page to redirect to after verification (success or error)
 EMAIL_VERIFIED_REDIRECT = os.getenv("EMAIL_VERIFIED_REDIRECT", "https://yemoda.site/auth/verified")
+
+# ---- Security headers ----
+# Always-on: prevents MIME sniffing and clickjacking
+SECURE_CONTENT_TYPE_NOSNIFF = True
+X_FRAME_OPTIONS = "DENY"
+SECURE_REFERRER_POLICY = "strict-origin-when-cross-origin"
+
+if not DEBUG:
+    # HSTS: tell browsers to always use HTTPS for 1 year
+    SECURE_HSTS_SECONDS = 31536000
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+    SECURE_HSTS_PRELOAD = True

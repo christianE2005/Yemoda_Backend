@@ -1,3 +1,4 @@
+from django.conf import settings
 from django.contrib import admin
 from django.urls import include, path
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
@@ -80,8 +81,6 @@ urlpatterns = [
     path("health/", HealthCheckView.as_view(), name="health-root"),
     path("api/health", HealthCheckView.as_view(), name="health-api-no-slash"),
     path("api/health/", HealthCheckView.as_view(), name="health"),
-    path("api/schema/", SpectacularAPIView.as_view(), name="schema"),
-    path("api/docs/", SpectacularSwaggerView.as_view(url_name="schema"), name="swagger-ui"),
     path("api/auth/login/", LoginView.as_view(), name="auth-login"),
     path("api/auth/register/", RegisterView.as_view(), name="auth-register"),
     path("api/auth/refresh/", RefreshView.as_view(), name="auth-refresh"),
@@ -102,6 +101,7 @@ urlpatterns = [
     path("api/github/commits/diff/", GithubCommitDiffView.as_view(), name="github-commit-diff"),
     path("api/github/contents/", GithubRepoContentsView.as_view(), name="github-repo-contents"),
     path("api/task-warnings/", TaskWarningListView.as_view(), name="task-warning-list"),
+    path("api/task-warnings/bulk/", TaskWarningListView.as_view(), name="task-warning-bulk-delete"),
     path("api/task-warnings/<int:warning_id>/", TaskWarningDetailView.as_view(), name="task-warning-detail"),
     path("api/tasks/<int:task_id>/history/", TaskHistoryView.as_view(), name="task-push-history"),
     path("api/tasks/<int:task_id>/branch/", TaskCreateBranchView.as_view(), name="task-create-branch"),
@@ -119,3 +119,10 @@ urlpatterns = [
     path("api/payments/cancel/", CancelSubscriptionView.as_view(), name="cancel-subscription"),
     path("api/payments/webhook/", StripeWebhookView.as_view(), name="stripe-webhook"),
 ]
+
+# Swagger/OpenAPI docs only in development
+if settings.DEBUG:
+    urlpatterns += [
+        path("api/schema/", SpectacularAPIView.as_view(), name="schema"),
+        path("api/docs/", SpectacularSwaggerView.as_view(url_name="schema"), name="swagger-ui"),
+    ]
