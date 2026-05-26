@@ -179,6 +179,7 @@ def create_or_get_push_event(
     ref: str,
     pusher: str | None,
     commits: list,
+    diff_text: str | None = None,
 ) -> GithubPushEvent:
     """Create a new GithubPushEvent record and return it."""
     push_event = GithubPushEvent(
@@ -187,6 +188,7 @@ def create_or_get_push_event(
         ref=ref,
         pusher=pusher,
         commits=commits,
+        diff_text=diff_text,
     )
     db.add(push_event)
     db.commit()

@@ -199,6 +199,7 @@ class GithubPushEvent(Base):
     ref: Mapped[str] = mapped_column(String(255), nullable=False)
     pusher: Mapped[str | None] = mapped_column(String(150), nullable=True)
     commits: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    diff_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     received_at: Mapped[DateTime] = mapped_column(DateTime, server_default=func.now())
 
 

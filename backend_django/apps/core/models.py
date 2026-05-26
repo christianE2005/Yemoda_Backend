@@ -551,6 +551,7 @@ class GithubPushEvent(models.Model):
     ref = models.CharField(max_length=255)
     pusher = models.CharField(max_length=150, null=True, blank=True)
     commits = models.JSONField(default=list)
+    diff_text = models.TextField(null=True, blank=True)
     received_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

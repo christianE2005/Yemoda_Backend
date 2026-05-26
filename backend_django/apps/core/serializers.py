@@ -269,6 +269,7 @@ class TaskPushMatchSerializer(serializers.ModelSerializer):
     push_received_at = serializers.DateTimeField(source="push.received_at", read_only=True)
     push_repo = serializers.CharField(source="push.repo_full_name", read_only=True)
     push_commits = serializers.JSONField(source="push.commits", read_only=True)
+    push_diff_text = serializers.CharField(source="push.diff_text", read_only=True, allow_null=True)
 
     class Meta:
         model = TaskPushMatch
@@ -283,4 +284,5 @@ class TaskPushMatchSerializer(serializers.ModelSerializer):
             "push_received_at",
             "push_repo",
             "push_commits",
+            "push_diff_text",
         ]

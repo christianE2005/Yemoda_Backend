@@ -105,6 +105,7 @@ async def _run_push_analysis(payload: dict, db: Session) -> None:
         ref=ref,
         pusher=pusher,
         commits=commits,
+        diff_text=diff,
     )
 
     stories = [
