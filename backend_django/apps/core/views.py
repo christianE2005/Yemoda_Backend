@@ -376,7 +376,7 @@ def _user_from_bearer_token(request) -> UserAccount | None:
 
 
 class UserAccountViewSet(viewsets.ModelViewSet):
-    queryset = UserAccount.objects.all()
+    queryset = UserAccount.objects.select_related('github_connection').all()
     serializer_class = UserAccountSerializer
 
     def get_queryset(self):
@@ -386,13 +386,13 @@ class UserAccountViewSet(viewsets.ModelViewSet):
         if search and len(search) >= 3:
             # With a search term, allow finding any non-admin user by username or email
             # (needed to add new members who don't yet share a project)
-            return UserAccount.objects.filter(
+            return UserAccount.objects.select_related('github_connection').filter(
                 Q(username__icontains=search) | Q(email__icontains=search),
                 is_admin=False,
             ).exclude(id_user=user.id_user).distinct()[:20]
 
         if user.is_admin:
-            return UserAccount.objects.all()
+            return UserAccount.objects.select_related('github_connection').all()
         # Non-admins: return themselves + users who share a project with them
         # (needed for the project member picker in the frontend)
         shared_project_user_ids = (
@@ -405,7 +405,7 @@ class UserAccountViewSet(viewsets.ModelViewSet):
             .values_list('id_user', flat=True)
             .distinct()
         )
-        return UserAccount.objects.filter(
+        return UserAccount.objects.select_related('github_connection').filter(
             Q(id_user=user.id_user) | Q(id_user__in=shared_project_user_ids)
         ).distinct()
 

@@ -32,10 +32,19 @@ class UserAccountSerializer(serializers.ModelSerializer):
     is_premium = serializers.BooleanField(read_only=True)
     subscription_plan = serializers.CharField(read_only=True, allow_null=True)
     is_email_verified = serializers.BooleanField(read_only=True)
+    github_connected = serializers.SerializerMethodField()
+    github_login = serializers.SerializerMethodField()
+
+    def get_github_connected(self, obj):
+        return hasattr(obj, 'github_connection')
+
+    def get_github_login(self, obj):
+        conn = getattr(obj, 'github_connection', None)
+        return conn.github_login if conn else None
 
     class Meta:
         model = UserAccount
-        fields = ["id_user", "email", "username", "password", "is_admin", "is_premium", "subscription_plan", "is_email_verified", "created_at"]
+        fields = ["id_user", "email", "username", "password", "is_admin", "is_premium", "subscription_plan", "is_email_verified", "created_at", "github_connected", "github_login"]
 
     def create(self, validated_data):
         password = validated_data.pop("password", None)
