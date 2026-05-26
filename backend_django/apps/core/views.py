@@ -1786,6 +1786,19 @@ class GithubCreateRepoView(APIView):
         return Response({"repository": repo, "webhook": hooks_response.json()}, status=status.HTTP_201_CREATED)
 
 
+class GithubDeleteRepoView(APIView):
+    @extend_schema(responses={204: None, 403: dict, 404: dict}, tags=["github-app"])
+    def delete(self, request, repo_id):
+        """Desvincula un repositorio de YeMoDa (no lo borra en GitHub)."""
+        repo = GithubRepo.objects.filter(pk=repo_id).first()
+        if not repo:
+            return Response({"detail": "Repositorio no encontrado."}, status=status.HTTP_404_NOT_FOUND)
+        if repo.user_id != request.user.id_user:
+            return Response({"detail": "No tienes permiso para desvincular este repositorio."}, status=status.HTTP_403_FORBIDDEN)
+        repo.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
 class GithubPushWebhookView(APIView):
     permission_classes = [AllowAny]
     throttle_classes = [ScopedRateThrottle]
