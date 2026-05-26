@@ -1844,7 +1844,10 @@ class GithubPushWebhookView(APIView):
         ref = payload.get("ref", "")
         pusher_name = (payload.get("pusher") or {}).get("name")
 
-        project = Project.objects.filter(repos__repo_full_name__iexact=repo_full_name).first()
+        project = (
+            Project.objects.filter(repos__repo_full_name__iexact=repo_full_name).first()
+            or Project.objects.filter(github_repo_full_name__iexact=repo_full_name).first()
+        )
         GithubPushEvent.objects.create(
             project=project,
             repo_full_name=repo_full_name,
@@ -1894,18 +1897,36 @@ class GithubPushListView(APIView):
         Filtros opcionales: ?project_id=1  o  ?repo=owner/repo
         """
         user = request.user
-        user_project_ids = Project.objects.filter(
-            Q(members__user=user) | Q(created_by=user)
-        ).values_list('id_project', flat=True)
+        user_project_ids = list(
+            Project.objects.filter(
+                Q(members__user=user) | Q(created_by=user)
+            ).values_list('id_project', flat=True)
+        )
 
-        qs = GithubPushEvent.objects.filter(project_id__in=user_project_ids)
-        project_id = request.query_params.get("project_id")
         repo = request.query_params.get("repo")
-        if project_id:
-            qs = qs.filter(project_id=project_id)
+        project_id = request.query_params.get("project_id")
+
         if repo:
-            qs = qs.filter(repo_full_name__iexact=repo)
-        qs = qs.order_by("-created_at")[:50]
+            # When filtering by repo, include events regardless of project linkage
+            # (some events may have project=null if the fallback path was used).
+            # Security: verify the user owns/belongs to a project tied to this repo.
+            user_repos = ProjectRepo.objects.filter(
+                project_id__in=user_project_ids,
+                repo_full_name__iexact=repo,
+            )
+            has_access = user_repos.exists() or Project.objects.filter(
+                id_project__in=user_project_ids,
+                github_repo_full_name__iexact=repo,
+            ).exists()
+            if not has_access:
+                return Response([], status=status.HTTP_200_OK)
+            qs = GithubPushEvent.objects.filter(repo_full_name__iexact=repo)
+        else:
+            qs = GithubPushEvent.objects.filter(project_id__in=user_project_ids)
+            if project_id:
+                qs = qs.filter(project_id=project_id)
+
+        qs = qs.order_by("-received_at")[:50]
         serializer = GithubPushEventSerializer(qs, many=True)
         return Response(serializer.data)
 
