@@ -226,7 +226,9 @@ GOOGLE_STATE_SECRET = os.getenv("GOOGLE_STATE_SECRET", JWT_SECRET_KEY)
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
 RESEND_FROM_EMAIL = os.getenv("RESEND_FROM_EMAIL", "noreply@yemoda.site")
 # Full backend URL prefix for the verification link in emails
-EMAIL_VERIFICATION_BASE_URL = os.getenv("EMAIL_VERIFICATION_BASE_URL", "https://yemoda.site/api/auth/verify-email/")
+# For scanner-proof verification: point this to the FRONTEND page that shows a "Verify" button,
+# which then POSTs to /api/auth/verify-email/. The default backend GET flow is kept for compatibility.
+EMAIL_VERIFICATION_BASE_URL = os.getenv("EMAIL_VERIFICATION_BASE_URL", "https://yemoda.site/auth/verify-email")
 # Frontend page to redirect to after verification (success or error)
 EMAIL_VERIFIED_REDIRECT = os.getenv("EMAIL_VERIFIED_REDIRECT", "https://yemoda.site/auth/verified")
 

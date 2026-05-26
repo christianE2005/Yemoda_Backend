@@ -1076,10 +1076,11 @@ class VerifyEmailView(APIView):
     @extend_schema(
         responses={302: None},
         tags=["auth"],
-        summary="Verificar correo electrónico",
-        description="El usuario llega aquí desde el link del correo. Verifica el token y redirige al frontend.",
+        summary="Verificar correo electrónico (GET — retrocompatibilidad)",
+        description="Link de correo heredado. Verifica el token y redirige al frontend.",
     )
     def get(self, request):
+        """Flujo heredado: el link del correo va directamente al backend."""
         token_value = request.query_params.get("token", "")
         redirect_base = settings.EMAIL_VERIFIED_REDIRECT
 
@@ -1100,6 +1101,34 @@ class VerifyEmailView(APIView):
         record.user.save(update_fields=["is_email_verified"])
 
         return HttpResponseRedirect(f"{redirect_base}?success=true")
+
+    @extend_schema(
+        request={"application/json": {"type": "object", "properties": {"token": {"type": "string"}}, "required": ["token"]}},
+        responses={200: dict, 400: dict},
+        tags=["auth"],
+        summary="Verificar correo electrónico (POST — recomendado)",
+        description="El frontend envía el token por POST. Los scanners de email no hacen POST, por lo que evita la auto-verificación.",
+    )
+    def post(self, request):
+        """Flujo recomendado: el frontend lee el token de la URL y hace POST al backend."""
+        token_value = request.data.get("token", "")
+        if not token_value:
+            return Response({"detail": "Token requerido."}, status=status.HTTP_400_BAD_REQUEST)
+
+        now = datetime.now(timezone.utc)
+        record = EmailVerificationToken.objects.select_related("user").filter(
+            token=token_value, used=False, expires_at__gt=now
+        ).first()
+
+        if not record:
+            return Response({"detail": "Token inválido o expirado."}, status=status.HTTP_400_BAD_REQUEST)
+
+        record.used = True
+        record.save(update_fields=["used"])
+        record.user.is_email_verified = True
+        record.user.save(update_fields=["is_email_verified"])
+
+        return Response({"detail": "Correo verificado correctamente."}, status=status.HTTP_200_OK)
 
 
 class ResendVerificationEmailView(APIView):
@@ -1252,6 +1281,10 @@ class GoogleOauthCallbackView(APIView):
                 "is_email_verified": True,
             },
         )
+        # Google already verified the email — always mark verified regardless of how the account was created
+        if not user.is_email_verified:
+            user.is_email_verified = True
+            user.save(update_fields=["is_email_verified"])
 
         tokens = _issue_tokens(user)
         redirect_url = (
@@ -1857,17 +1890,22 @@ class GithubPushListView(APIView):
     @extend_schema(responses={200: GithubPushEventSerializer(many=True)}, tags=["github-app"])
     def get(self, request):
         """
-        Retorna los push events recibidos.
+        Retorna los push events de los proyectos del usuario.
         Filtros opcionales: ?project_id=1  o  ?repo=owner/repo
         """
-        qs = GithubPushEvent.objects.all()
+        user = request.user
+        user_project_ids = Project.objects.filter(
+            Q(members__user=user) | Q(created_by=user)
+        ).values_list('id_project', flat=True)
+
+        qs = GithubPushEvent.objects.filter(project_id__in=user_project_ids)
         project_id = request.query_params.get("project_id")
         repo = request.query_params.get("repo")
         if project_id:
             qs = qs.filter(project_id=project_id)
         if repo:
             qs = qs.filter(repo_full_name__iexact=repo)
-        qs = qs[:50]
+        qs = qs.order_by("-created_at")[:50]
         serializer = GithubPushEventSerializer(qs, many=True)
         return Response(serializer.data)
 
