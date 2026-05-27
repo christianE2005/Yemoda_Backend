@@ -1,7 +1,10 @@
 import jwt
+from datetime import datetime, timedelta, timezone
 from django.conf import settings
 from rest_framework import authentication, exceptions, permissions
 from .models import UserAccount
+
+EMAIL_VERIFICATION_GRACE_DAYS = 7
 
 class UserAccountAuthentication(authentication.BaseAuthentication):
     def authenticate(self, request):
@@ -38,6 +41,14 @@ class UserAccountAuthentication(authentication.BaseAuthentication):
         user = UserAccount.objects.filter(id_user=user_id).first()
         if not user:
             raise exceptions.AuthenticationFailed("Usuario no encontrado.")
+
+        if not user.is_email_verified:
+            grace_expires = user.created_at + timedelta(days=EMAIL_VERIFICATION_GRACE_DAYS)
+            if datetime.now(timezone.utc) > grace_expires:
+                raise exceptions.AuthenticationFailed({
+                    "detail": "Tu cuenta está bloqueada. Por favor verifica tu correo electrónico para continuar.",
+                    "code": "email_verification_required",
+                })
 
         return (user, token)
 

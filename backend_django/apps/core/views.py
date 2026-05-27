@@ -1022,10 +1022,16 @@ class LoginView(APIView):
             return Response({"detail": "Credenciales invalidas."}, status=status.HTTP_401_UNAUTHORIZED)
 
         if not user.is_email_verified:
-            return Response(
-                {"detail": "Por favor verifica tu correo electrónico antes de iniciar sesión.", "code": "email_not_verified"},
-                status=status.HTTP_403_FORBIDDEN,
-            )
+            grace_expires = user.created_at + timedelta(days=7)
+            if datetime.now(timezone.utc) > grace_expires:
+                return Response(
+                    {
+                        "detail": "Tu cuenta está bloqueada. Por favor verifica tu correo electrónico para continuar.",
+                        "code": "email_verification_required",
+                    },
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+            # Within 7-day grace period — allow login
 
         tokens = _issue_tokens(user)
         return Response({**tokens, "user": UserAccountSerializer(user).data}, status=status.HTTP_200_OK)
