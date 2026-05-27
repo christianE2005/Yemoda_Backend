@@ -1227,6 +1227,21 @@ def _decode_google_oauth_state(state: str) -> dict | None:
     return payload
 
 
+def _generate_unique_username(base_name: str) -> str:
+    base = (base_name or "").strip() or "user"
+    base = re.sub(r"\s+", " ", base)[:100].strip()
+    if not base:
+        base = "user"
+
+    candidate = base
+    suffix = 1
+    while UserAccount.objects.filter(username__iexact=candidate).exists():
+        suffix += 1
+        tail = f" {suffix}"
+        candidate = f"{base[: max(1, 100 - len(tail))]}{tail}"
+    return candidate
+
+
 class GoogleOauthStartView(APIView):
     authentication_classes = []
     permission_classes = [AllowAny]
@@ -1243,8 +1258,7 @@ class GoogleOauthStartView(APIView):
                 {"detail": "Google OAuth no está configurado."},
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
-        requested_nickname = (request.query_params.get("nickname") or "").strip()
-        state = _build_google_oauth_state(nickname=requested_nickname)
+        state = _build_google_oauth_state()
         params = {
             "client_id": settings.GOOGLE_CLIENT_ID,
             "redirect_uri": settings.GOOGLE_REDIRECT_URI,
@@ -1297,7 +1311,6 @@ class GoogleOauthCallbackView(APIView):
         code = request.query_params.get("code")
         state = request.query_params.get("state", "")
         oauth_payload = _decode_google_oauth_state(state)
-        requested_nickname = ((oauth_payload or {}).get("nickname") or "").strip()
 
         if error or not code:
             return HttpResponseRedirect(f"{frontend_redirect}?error={error or 'no_code'}")
@@ -1340,18 +1353,19 @@ class GoogleOauthCallbackView(APIView):
 
         # Auto-register new users on first Google login (Google already verified the email)
         user = UserAccount.objects.filter(email=email).first()
+        needs_nickname = False
         if not user:
-            if not requested_nickname:
-                return HttpResponseRedirect(f"{frontend_redirect}?error=missing_nickname")
-            if UserAccount.objects.filter(username__iexact=requested_nickname).exists():
-                return HttpResponseRedirect(f"{frontend_redirect}?error=nickname_taken")
+            display_name = (userinfo.get("name") or "").strip()
+            fallback_name = email.split("@")[0]
+            generated_username = _generate_unique_username(display_name or fallback_name)
 
             user = UserAccount.objects.create(
                 email=email,
-                username=requested_nickname,
+                username=generated_username,
                 password_hash=make_password(None),  # unusable — Google-only login
                 is_email_verified=True,
             )
+            needs_nickname = True
         # Google already verified the email — always mark verified regardless of how the account was created
         if not user.is_email_verified:
             user.is_email_verified = True
@@ -1363,6 +1377,7 @@ class GoogleOauthCallbackView(APIView):
             f"?access_token={tokens['access_token']}"
             f"&refresh_token={tokens['refresh_token']}"
             f"&expires_at={tokens['expires_at']}"
+            f"&needs_nickname={'1' if needs_nickname else '0'}"
         )
         return HttpResponseRedirect(redirect_url)
 
