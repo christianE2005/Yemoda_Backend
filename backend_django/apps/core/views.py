@@ -1228,10 +1228,10 @@ class GoogleOauthStartView(APIView):
     permission_classes = [AllowAny]
 
     @extend_schema(
-        responses={200: dict, 503: dict},
+        responses={302: None, 503: dict},
         tags=["auth"],
         summary="Iniciar flujo OAuth con Google",
-        description="Devuelve la URL de autorización de Google. El frontend redirige al usuario a esa URL.",
+        description="Redirige al usuario a la URL de autorización de Google.",
     )
     def get(self, request):
         if not settings.GOOGLE_CLIENT_ID or not settings.GOOGLE_REDIRECT_URI:
@@ -1250,7 +1250,7 @@ class GoogleOauthStartView(APIView):
             "prompt": "select_account",
         }
         auth_url = f"{GOOGLE_AUTH_URL}?{urlencode(params)}"
-        return Response({"auth_url": auth_url, "state": state})
+        return HttpResponseRedirect(auth_url)
 
 
 class GoogleOauthCallbackView(APIView):
