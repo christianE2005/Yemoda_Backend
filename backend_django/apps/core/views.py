@@ -735,6 +735,11 @@ class SprintViewSet(viewsets.ModelViewSet):
             qs = qs.filter(status=sprint_status)
         return qs
 
+    def perform_destroy(self, instance):
+        if instance.project.created_by != self.request.user:
+            raise PermissionDenied("Solo el creador puede eliminar sprints.")
+        instance.delete()
+
 
 class MilestoneViewSet(viewsets.ModelViewSet):
     queryset = Milestone.objects.all()
@@ -756,6 +761,32 @@ class MilestoneViewSet(viewsets.ModelViewSet):
         if project_id is not None:
             qs = qs.filter(project_id=project_id)
         return qs
+
+    def _validate_due_date(self, project, due_date):
+        if due_date is None:
+            return
+        from datetime import date as date_type
+        project_created_date = project.created_at.date() if hasattr(project.created_at, 'date') else project.created_at
+        if isinstance(due_date, str):
+            from datetime import date as _date
+            due_date = _date.fromisoformat(due_date)
+        if due_date < project_created_date:
+            raise serializers.ValidationError(
+                {"due_date": "La fecha no puede ser anterior a la creación del proyecto."}
+            )
+
+    def perform_create(self, serializer):
+        project = serializer.validated_data.get('project')
+        due_date = serializer.validated_data.get('due_date')
+        self._validate_due_date(project, due_date)
+        serializer.save()
+
+    def perform_update(self, serializer):
+        instance = self.get_object()
+        project = serializer.validated_data.get('project', instance.project)
+        due_date = serializer.validated_data.get('due_date', instance.due_date)
+        self._validate_due_date(project, due_date)
+        serializer.save()
 
     def perform_destroy(self, instance):
         if instance.project.created_by != self.request.user:
