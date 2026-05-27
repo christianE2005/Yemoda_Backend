@@ -5,7 +5,7 @@ import json
 import re
 import secrets
 import unicodedata
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit, urlunsplit
 
 import jwt
 import requests
@@ -1264,7 +1264,30 @@ class GoogleOauthCallbackView(APIView):
         description="Google redirige aquí con el código de autorización. El backend lo intercambia, crea o recupera el usuario y redirige al frontend con los tokens JWT.",
     )
     def get(self, request):
-        frontend_redirect = settings.GOOGLE_AUTH_FRONTEND_REDIRECT
+        frontend_redirect = (settings.GOOGLE_AUTH_FRONTEND_REDIRECT or "").strip()
+        if not frontend_redirect:
+            frontend_redirect = "https://yemoda.site/auth/google/callback"
+
+        # Defensive fallback: if env points to site root, force the callback path.
+        parsed_redirect = urlsplit(frontend_redirect)
+        if parsed_redirect.scheme and parsed_redirect.netloc:
+            normalized_path = parsed_redirect.path or "/auth/google/callback"
+            if normalized_path == "/":
+                normalized_path = "/auth/google/callback"
+            elif normalized_path.endswith("/") and normalized_path != "/":
+                normalized_path = normalized_path.rstrip("/")
+            frontend_redirect = urlunsplit(
+                (
+                    parsed_redirect.scheme,
+                    parsed_redirect.netloc,
+                    normalized_path,
+                    parsed_redirect.query,
+                    parsed_redirect.fragment,
+                )
+            )
+        elif frontend_redirect == "/":
+            frontend_redirect = "/auth/google/callback"
+
         error = request.query_params.get("error")
         code = request.query_params.get("code")
         state = request.query_params.get("state", "")
