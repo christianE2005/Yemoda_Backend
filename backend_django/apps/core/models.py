@@ -51,20 +51,20 @@ class UserAccount(models.Model):
 
 
 class Project(models.Model):
-    PLANNING = "Planeación"
-    IN_PROGRESS = "En Progreso"
-    IN_REVIEW = "Revisión"
-    FINISHED = "Finalizado"
-    RETIRED = "Retirado"
-    CANCELLED = "Cancelado"
+    PLANNING = "Planning"
+    IN_PROGRESS = "In Progress"
+    IN_REVIEW = "Review"
+    FINISHED = "Finished"
+    RETIRED = "Retired"
+    CANCELLED = "Cancelled"
 
     STATUS_CHOICES = [
-        (PLANNING, "Planeación"),
-        (IN_PROGRESS, "En Progreso"),
-        (IN_REVIEW, "Revisión"),
-        (FINISHED, "Finalizado"),
-        (RETIRED, "Retirado"),
-        (CANCELLED, "Cancelado"),
+        (PLANNING,    "Planning"),
+        (IN_PROGRESS, "In Progress"),
+        (IN_REVIEW,   "Review"),
+        (FINISHED,    "Finished"),
+        (RETIRED,     "Retired"),
+        (CANCELLED,   "Cancelled"),
     ]
 
     id_project = models.BigAutoField(primary_key=True)
@@ -72,7 +72,7 @@ class Project(models.Model):
     description = models.TextField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     end_date = models.DateField(null=True, blank=True)
-    status = models.CharField(max_length=50, choices=STATUS_CHOICES, default=IN_PROGRESS)
+    status = models.CharField(max_length=50, choices=STATUS_CHOICES, default=PLANNING)
     created_by = models.ForeignKey(
         UserAccount,
         on_delete=models.SET_NULL,
