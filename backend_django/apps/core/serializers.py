@@ -46,6 +46,18 @@ class UserAccountSerializer(serializers.ModelSerializer):
         model = UserAccount
         fields = ["id_user", "email", "username", "password", "is_admin", "is_premium", "subscription_plan", "is_email_verified", "created_at", "github_connected", "github_login"]
 
+    def validate_username(self, value):
+        username = value.strip()
+        if not username:
+            raise serializers.ValidationError("El nickname no puede estar vacío.")
+
+        qs = UserAccount.objects.filter(username__iexact=username)
+        if self.instance:
+            qs = qs.exclude(pk=self.instance.pk)
+        if qs.exists():
+            raise serializers.ValidationError("Este nickname ya está en uso.")
+        return username
+
     def create(self, validated_data):
         password = validated_data.pop("password", None)
         user = UserAccount(**validated_data)
@@ -56,6 +68,8 @@ class UserAccountSerializer(serializers.ModelSerializer):
 
     def update(self, instance, validated_data):
         password = validated_data.pop("password", None)
+        # Profile updates cannot change email.
+        validated_data.pop("email", None)
         if password:
             instance.password_hash = make_password(password)
         return super().update(instance, validated_data)
@@ -229,6 +243,14 @@ class RegisterSerializer(serializers.Serializer):
     email = serializers.EmailField(max_length=150)
     username = serializers.CharField(max_length=100)
     password = serializers.CharField(write_only=True, min_length=8)
+
+    def validate_username(self, value):
+        username = value.strip()
+        if not username:
+            raise serializers.ValidationError("El nickname no puede estar vacío.")
+        if UserAccount.objects.filter(username__iexact=username).exists():
+            raise serializers.ValidationError("Este nickname ya está en uso.")
+        return username
 
 
 class LoginSerializer(serializers.Serializer):

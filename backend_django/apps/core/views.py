@@ -1205,22 +1205,26 @@ GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
 
 
-def _build_google_oauth_state() -> str:
+def _build_google_oauth_state(nickname: str | None = None) -> str:
     expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
     payload = {
         "nonce": secrets.token_urlsafe(24),
         "exp": int(expires_at.timestamp()),
         "purpose": "google_oauth",
     }
+    if nickname:
+        payload["nickname"] = nickname.strip()
     return jwt.encode(payload, settings.GOOGLE_STATE_SECRET, algorithm="HS256")
 
 
-def _validate_google_oauth_state(state: str) -> bool:
+def _decode_google_oauth_state(state: str) -> dict | None:
     try:
         payload = jwt.decode(state, settings.GOOGLE_STATE_SECRET, algorithms=["HS256"])
     except jwt.InvalidTokenError:
-        return False
-    return payload.get("purpose") == "google_oauth"
+        return None
+    if payload.get("purpose") != "google_oauth":
+        return None
+    return payload
 
 
 class GoogleOauthStartView(APIView):
@@ -1239,7 +1243,8 @@ class GoogleOauthStartView(APIView):
                 {"detail": "Google OAuth no está configurado."},
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
-        state = _build_google_oauth_state()
+        requested_nickname = (request.query_params.get("nickname") or "").strip()
+        state = _build_google_oauth_state(nickname=requested_nickname)
         params = {
             "client_id": settings.GOOGLE_CLIENT_ID,
             "redirect_uri": settings.GOOGLE_REDIRECT_URI,
@@ -1291,11 +1296,13 @@ class GoogleOauthCallbackView(APIView):
         error = request.query_params.get("error")
         code = request.query_params.get("code")
         state = request.query_params.get("state", "")
+        oauth_payload = _decode_google_oauth_state(state)
+        requested_nickname = ((oauth_payload or {}).get("nickname") or "").strip()
 
         if error or not code:
             return HttpResponseRedirect(f"{frontend_redirect}?error={error or 'no_code'}")
 
-        if not _validate_google_oauth_state(state):
+        if not oauth_payload:
             return HttpResponseRedirect(f"{frontend_redirect}?error=invalid_state")
 
         # Exchange authorization code for Google access token
@@ -1332,15 +1339,19 @@ class GoogleOauthCallbackView(APIView):
             return HttpResponseRedirect(f"{frontend_redirect}?error=no_email")
 
         # Auto-register new users on first Google login (Google already verified the email)
-        name = userinfo.get("name") or email.split("@")[0]
-        user, _ = UserAccount.objects.get_or_create(
-            email=email,
-            defaults={
-                "username": name,
-                "password_hash": make_password(None),  # unusable — Google-only login
-                "is_email_verified": True,
-            },
-        )
+        user = UserAccount.objects.filter(email=email).first()
+        if not user:
+            if not requested_nickname:
+                return HttpResponseRedirect(f"{frontend_redirect}?error=missing_nickname")
+            if UserAccount.objects.filter(username__iexact=requested_nickname).exists():
+                return HttpResponseRedirect(f"{frontend_redirect}?error=nickname_taken")
+
+            user = UserAccount.objects.create(
+                email=email,
+                username=requested_nickname,
+                password_hash=make_password(None),  # unusable — Google-only login
+                is_email_verified=True,
+            )
         # Google already verified the email — always mark verified regardless of how the account was created
         if not user.is_email_verified:
             user.is_email_verified = True
