@@ -882,6 +882,69 @@ class TaskViewSet(viewsets.ModelViewSet):
 
         return qs.distinct().prefetch_related('assignments__assigned_to', 'tags')
 
+    @extend_schema(
+        responses={200: dict},
+        tags=["tasks"],
+        summary="Generar prompt IA para resolver warnings activos de una tarea",
+        description=(
+            "Retorna los warnings activos de la tarea y un prompt listo para copiar/pegar "
+            "en otra IA para intentar resolverlos."
+        ),
+    )
+    @action(detail=True, methods=['get'], url_path='ai-fix-prompt')
+    def ai_fix_prompt(self, request, pk=None):
+        task = self.get_object()
+        active_warnings = list(
+            TaskWarning.objects.filter(task=task, status=TaskWarning.STATUS_ACTIVE)
+            .order_by('-created_at')
+        )
+
+        severity_order = {'critical': 0, 'warning': 1, 'info': 2}
+        active_warnings.sort(key=lambda w: (severity_order.get(w.severity, 3), -w.id_warning))
+
+        warnings_payload = [
+            {
+                'id_warning': w.id_warning,
+                'severity': w.severity,
+                'message': w.message,
+                'created_at': w.created_at.isoformat() if w.created_at else None,
+            }
+            for w in active_warnings
+        ]
+
+        if warnings_payload:
+            warnings_lines = "\n".join(
+                f"- [{w['severity'].upper()}] (ID {w['id_warning']}): {w['message']}"
+                for w in warnings_payload
+            )
+        else:
+            warnings_lines = "- No hay warnings activos reportados para esta tarea."
+
+        prompt_text = (
+            "Actúa como senior engineer y corrige esta tarea priorizando seguridad y funcionamiento.\n\n"
+            f"Tarea: {task.title}\n"
+            f"Descripción: {task.description or 'Sin descripción.'}\n\n"
+            "Warnings activos detectados por code review:\n"
+            f"{warnings_lines}\n\n"
+            "Instrucciones:\n"
+            "1) Propón una solución concreta para cada warning.\n"
+            "2) Entrega los cambios de código exactos por archivo.\n"
+            "3) Si hay trade-offs, explica el impacto.\n"
+            "4) Incluye pruebas mínimas para validar cada corrección.\n"
+            "5) Mantén compatibilidad con el comportamiento actual no afectado."
+        )
+
+        return Response(
+            {
+                'task_id': task.id_task,
+                'task_title': task.title,
+                'warnings_count': len(warnings_payload),
+                'warnings': warnings_payload,
+                'copy_prompt': prompt_text,
+            },
+            status=status.HTTP_200_OK,
+        )
+
 
 class TaskCommentViewSet(viewsets.ModelViewSet):
     queryset = TaskComment.objects.all()

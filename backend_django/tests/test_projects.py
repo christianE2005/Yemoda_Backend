@@ -2,7 +2,7 @@ import pytest
 from django.contrib.auth.hashers import make_password
 from rest_framework import status
 
-from apps.core.models import Project, Task, UserAccount
+from apps.core.models import Project, Task, TaskWarning, UserAccount
 
 
 @pytest.mark.django_db
@@ -188,3 +188,69 @@ class TestTasks:
         resp = api_client.delete(f"/api/tasks/{tid}/", **auth_headers)
         assert resp.status_code == status.HTTP_204_NO_CONTENT
         assert not Task.objects.filter(pk=tid).exists()
+
+    def test_ai_fix_prompt_returns_active_warnings_and_prompt(self, api_client, auth_headers):
+        project_resp = api_client.post(
+            "/api/projects/",
+            {"name": "AI Prompt Project"},
+            format="json",
+            **auth_headers,
+        )
+        pid = project_resp.data["id_project"]
+
+        task_resp = api_client.post(
+            "/api/tasks/",
+            {"title": "Fix login flow", "description": "Corregir fallos de autenticación", "project": pid},
+            format="json",
+            **auth_headers,
+        )
+        tid = task_resp.data["id_task"]
+        task = Task.objects.get(pk=tid)
+
+        TaskWarning.objects.create(task=task, message="Falta validar JWT expirado", severity="critical", status="active")
+        TaskWarning.objects.create(task=task, message="No hay test para refresh token", severity="warning", status="active")
+        TaskWarning.objects.create(task=task, message="Issue ya resuelto", severity="info", status="resolved")
+
+        resp = api_client.get(f"/api/tasks/{tid}/ai-fix-prompt/", **auth_headers)
+
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.data["task_id"] == tid
+        assert resp.data["warnings_count"] == 2
+        assert len(resp.data["warnings"]) == 2
+        assert "Falta validar JWT expirado" in resp.data["copy_prompt"]
+        assert "No hay test para refresh token" in resp.data["copy_prompt"]
+
+    def test_ai_fix_prompt_hidden_for_non_member(self, api_client, auth_headers):
+        project_resp = api_client.post(
+            "/api/projects/",
+            {"name": "Private Prompt Project"},
+            format="json",
+            **auth_headers,
+        )
+        pid = project_resp.data["id_project"]
+
+        task_resp = api_client.post(
+            "/api/tasks/",
+            {"title": "Private Task", "project": pid},
+            format="json",
+            **auth_headers,
+        )
+        tid = task_resp.data["id_task"]
+
+        other = UserAccount.objects.create(
+            email="other3@test.com",
+            username="other3",
+            password_hash=make_password("pass123456"),
+        )
+        login = api_client.post(
+            "/api/auth/login/",
+            {"email": other.email, "password": "pass123456"},
+            format="json",
+        )
+        other_token = login.data["access_token"]
+
+        resp = api_client.get(
+            f"/api/tasks/{tid}/ai-fix-prompt/",
+            HTTP_AUTHORIZATION=f"Bearer {other_token}",
+        )
+        assert resp.status_code == status.HTTP_404_NOT_FOUND
