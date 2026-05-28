@@ -189,19 +189,21 @@ def create_or_get_push_event(
     """
     # 15-minute window is enough for forwarded/retried deliveries of the same push.
     recent_cutoff = datetime.now(timezone.utc) - timedelta(minutes=15)
-    existing = (
+    candidate_events = (
         db.query(GithubPushEvent)
         .filter(
             GithubPushEvent.id_project == project_id,
             func.lower(GithubPushEvent.repo_full_name) == repo_full_name.lower(),
             GithubPushEvent.ref == ref,
             GithubPushEvent.pusher == pusher,
-            GithubPushEvent.commits == commits,
             GithubPushEvent.received_at >= recent_cutoff,
         )
         .order_by(GithubPushEvent.received_at.desc())
-        .first()
+        .limit(20)
+        .all()
     )
+    existing = next((ev for ev in candidate_events if (ev.commits or []) == (commits or [])), None)
+
     if existing:
         # If Django stored the event first (without diff), enrich it here.
         if diff_text and not existing.diff_text:
