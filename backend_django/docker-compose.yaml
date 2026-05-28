@@ -45,6 +45,28 @@ services:
     networks:
       - abcdh_network
 
+  fastapi:
+    image: python:3.11-slim
+    container_name: abcdh_fastapi
+    restart: unless-stopped
+    working_dir: /app
+    command: >
+      sh -c "pip install --no-cache-dir -r requirements.txt &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8001"
+    volumes:
+      - ../backend_fastapi:/app
+    ports:
+      - "8001:8001"
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - ../backend_fastapi/.env
+    environment:
+      FASTAPI_DATABASE_URL: postgresql+psycopg2://your-db-user:your-db-password@db:5432/your-db-name
+    networks:
+      - abcdh_network
+
 volumes:
   postgres_data:
 

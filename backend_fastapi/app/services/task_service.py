@@ -1,6 +1,6 @@
 import logging
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -181,7 +181,35 @@ def create_or_get_push_event(
     commits: list,
     diff_text: str | None = None,
 ) -> GithubPushEvent:
-    """Create a new GithubPushEvent record and return it."""
+    """Create or reuse a GithubPushEvent to avoid duplicate rows per same push.
+
+    Django's webhook endpoint can persist the raw push first, then forward the same
+    payload to FastAPI for analysis. Without idempotency this creates 2 rows for a
+    single GitHub push. We reuse a recent matching row and only enrich diff_text.
+    """
+    # 15-minute window is enough for forwarded/retried deliveries of the same push.
+    recent_cutoff = datetime.now(timezone.utc) - timedelta(minutes=15)
+    existing = (
+        db.query(GithubPushEvent)
+        .filter(
+            GithubPushEvent.id_project == project_id,
+            func.lower(GithubPushEvent.repo_full_name) == repo_full_name.lower(),
+            GithubPushEvent.ref == ref,
+            GithubPushEvent.pusher == pusher,
+            GithubPushEvent.commits == commits,
+            GithubPushEvent.received_at >= recent_cutoff,
+        )
+        .order_by(GithubPushEvent.received_at.desc())
+        .first()
+    )
+    if existing:
+        # If Django stored the event first (without diff), enrich it here.
+        if diff_text and not existing.diff_text:
+            existing.diff_text = diff_text
+            db.commit()
+            db.refresh(existing)
+        return existing
+
     push_event = GithubPushEvent(
         id_project=project_id,
         repo_full_name=repo_full_name,
