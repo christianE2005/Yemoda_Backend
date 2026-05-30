@@ -3276,7 +3276,7 @@ class GithubRepoBranchesView(APIView):
         return Response({"branches": branches})
 
     @staticmethod
-    def _resolve_token(request, repo: str) -> str | "Response":
+    def _resolve_token(request, repo: str) -> str | Response:
         """Try installation token first, fall back to user OAuth token."""
         org_login = repo.split("/")[0] if "/" in repo else repo
         installation = GithubAppInstallation.objects.filter(account_login__iexact=org_login).first()
