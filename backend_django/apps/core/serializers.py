@@ -19,6 +19,7 @@ from .models import (
     TaskAssignment,
     TaskComment,
     TaskPriority,
+    TaskAIReviewResult,
     TaskPushMatch,
     TaskStatus,
     TaskWarning,
@@ -230,6 +231,12 @@ class GithubPushEventSerializer(serializers.ModelSerializer):
 class TaskWarningSerializer(serializers.ModelSerializer):
     class Meta:
         model = TaskWarning
+        fields = "__all__"
+
+
+class TaskAIReviewResultSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = TaskAIReviewResult
         fields = "__all__"
 
 

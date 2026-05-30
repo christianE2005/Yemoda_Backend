@@ -45,6 +45,7 @@ from .models import (
     TaskPriority,
     TaskPushMatch,
     TaskStatus,
+    TaskAIReviewResult,
     TaskWarning,
     UserAccount,
     StripePayment,
@@ -77,6 +78,7 @@ from .serializers import (
     TaskPushMatchSerializer,
     TaskSerializer,
     TaskStatusSerializer,
+    TaskAIReviewResultSerializer,
     TaskWarningSerializer,
     UserAccountSerializer,
 )
@@ -771,7 +773,7 @@ class MilestoneViewSet(viewsets.ModelViewSet):
             from datetime import date as _date
             due_date = _date.fromisoformat(due_date)
         if due_date < project_created_date:
-            raise serializers.ValidationError(
+            raise ValidationError(
                 {"due_date": "La fecha no puede ser anterior a la creación del proyecto."}
             )
 
@@ -2318,6 +2320,34 @@ class TaskWarningListView(APIView):
 
         serializer = TaskWarningSerializer(qs[:100], many=True)
         return Response(serializer.data)
+
+
+class TaskAIReviewResultViewSet(viewsets.ModelViewSet):
+    queryset = TaskAIReviewResult.objects.select_related("task", "user").all()
+    serializer_class = TaskAIReviewResultSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        user_project_ids = Project.objects.filter(
+            Q(created_by=user) | Q(members__user=user)
+        ).distinct().values_list("id_project", flat=True)
+
+        qs = TaskAIReviewResult.objects.select_related("task", "user").filter(task__project_id__in=user_project_ids)
+        task_id = self.request.query_params.get("task")
+        if task_id:
+            qs = qs.filter(task_id=task_id)
+        return qs
+
+    def perform_create(self, serializer):
+        task = serializer.validated_data.get("task")
+        if not task:
+            raise ValidationError({"task": "task es requerido."})
+
+        user = self.request.user
+        if task.project.created_by_id != user.id_user and not ProjectMember.objects.filter(project=task.project, user=user).exists():
+            raise PermissionDenied("No tienes acceso a esta tarea.")
+
+        serializer.save(user=user)
 
     @extend_schema(
         request={"application/json": {"type": "object", "properties": {"ids": {"type": "array", "items": {"type": "integer"}}}, "required": ["ids"]}},

@@ -48,6 +48,7 @@ from apps.core.views import (
     TaskCreateBranchView,
     TaskHistoryView,
     TaskPriorityViewSet,
+    TaskAIReviewResultViewSet,
     TaskPullRequestsView,
     TaskStatusViewSet,
     TaskViewSet,
@@ -77,6 +78,7 @@ router.register(r"task-priorities", TaskPriorityViewSet)
 router.register(r"tasks", TaskViewSet)
 router.register(r"task-assignments", TaskAssignmentViewSet)
 router.register(r"task-comments", TaskCommentViewSet)
+router.register(r"task-ai-review-results", TaskAIReviewResultViewSet)
 router.register(r"activity-logs", ActivityLogViewSet)
 
 urlpatterns = [

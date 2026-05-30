@@ -610,6 +610,39 @@ class TaskWarning(models.Model):
         ordering = ["-created_at"]
 
 
+class TaskAIReviewResult(models.Model):
+    PROVIDER_COPILOT = "copilot"
+    PROVIDER_YEMODA = "yemoda"
+    PROVIDER_CHOICES = [
+        (PROVIDER_COPILOT, "Copilot"),
+        (PROVIDER_YEMODA, "Yemoda"),
+    ]
+
+    id_review_result = models.BigAutoField(primary_key=True)
+    task = models.ForeignKey(
+        Task,
+        on_delete=models.CASCADE,
+        db_column="id_task",
+        related_name="ai_review_results",
+    )
+    user = models.ForeignKey(
+        UserAccount,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        db_column="id_user",
+        related_name="ai_review_results",
+    )
+    provider = models.CharField(max_length=20, choices=PROVIDER_CHOICES)
+    model_name = models.CharField(max_length=100, null=True, blank=True)
+    result_text = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "task_ai_review_result"
+        ordering = ["-created_at"]
+
+
 class TaskPushMatch(models.Model):
     COVERAGE_FULL = "full"
     COVERAGE_PARTIAL = "partial"
