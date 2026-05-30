@@ -2226,16 +2226,25 @@ class GithubRepoContentsView(APIView):
 
         org_login = repo.split("/")[0] if "/" in repo else repo
         installation = GithubAppInstallation.objects.filter(account_login__iexact=org_login).first()
-        if not installation:
+
+        token = None
+        if installation:
+            try:
+                token = _installation_access_token(installation.installation_id)
+            except Exception:
+                token = None
+
+        # Fallback: use the authenticated user's personal OAuth token
+        if not token:
+            conn = GithubConnection.objects.filter(user=request.user).first()
+            if conn and conn.access_token:
+                token = conn.access_token
+
+        if not token:
             return Response(
-                {"detail": f"No se encontró instalación de GitHub App para '{org_login}'."},
+                {"detail": f"No se pudo obtener token de instalacion para '{org_login}'. Conecta tu cuenta de GitHub."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-
-        try:
-            token = _installation_access_token(installation.installation_id)
-        except Exception as exc:
-            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
         url = f"{GITHUB_API_URL}/repos/{repo}/contents/{path}"
         params = {}
