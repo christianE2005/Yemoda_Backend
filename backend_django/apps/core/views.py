@@ -11,7 +11,7 @@ import jwt
 import requests
 from django.conf import settings
 from django.contrib.auth.hashers import check_password, make_password
-from django.http import HttpResponse, HttpResponseRedirect
+from django.http import HttpResponse, HttpResponseRedirect, JsonResponse, StreamingHttpResponse
 from django.db import models
 from django.db.models import Q
 from drf_spectacular.utils import extend_schema
@@ -3446,6 +3446,60 @@ class GithubCommitFilesView(APIView):
             },
             status=status.HTTP_201_CREATED,
         )
+
+
+class GithubChatProxyView(APIView):
+    """Proxy chat requests from Django to the FastAPI service."""
+
+    @extend_schema(responses={200: dict, 400: dict, 401: dict, 403: dict, 404: dict, 502: dict}, tags=["chat"])
+    def post(self, request):
+        fastapi_base_url = getattr(settings, "FASTAPI_CHAT_BASE_URL", "https://fast.yemoda.site").rstrip("/")
+        upstream_url = f"{fastapi_base_url}/api/chat/"
+        payload = request.data
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": request.headers.get("Accept", "application/json"),
+        }
+
+        # Preserve the caller's Authorization header if present so the upstream can
+        # keep using the same user identity for audit/logging if needed.
+        auth_header = request.headers.get("Authorization", "").strip()
+        if auth_header:
+            headers["Authorization"] = auth_header
+
+        stream = bool(payload.get("stream")) if isinstance(payload, dict) else False
+
+        try:
+            if stream:
+                upstream = requests.post(upstream_url, json=payload, headers=headers, stream=True, timeout=120)
+
+                def event_stream():
+                    try:
+                        for chunk in upstream.iter_content(chunk_size=4096):
+                            if chunk:
+                                yield chunk
+                    finally:
+                        upstream.close()
+
+                response = StreamingHttpResponse(event_stream(), content_type=upstream.headers.get("Content-Type", "text/event-stream"))
+                response.status_code = upstream.status_code
+                for header_name in ("Cache-Control", "X-Accel-Buffering"):
+                    if upstream.headers.get(header_name):
+                        response[header_name] = upstream.headers[header_name]
+                return response
+
+            upstream = requests.post(upstream_url, json=payload, headers=headers, timeout=120)
+        except requests.RequestException as exc:
+            return JsonResponse(
+                {"detail": "No se pudo conectar con el servicio de IA de FastAPI.", "error": str(exc)},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        content_type = upstream.headers.get("Content-Type", "application/json")
+        if upstream.status_code >= 400:
+            return HttpResponse(upstream.content, status=upstream.status_code, content_type=content_type)
+
+        return HttpResponse(upstream.content, status=upstream.status_code, content_type=content_type)
 
 
 class GithubAppDebugView(APIView):
