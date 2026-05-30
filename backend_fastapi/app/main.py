@@ -33,6 +33,7 @@ app.add_middleware(SlowAPIMiddleware)
 app.include_router(webhook.router)
 app.include_router(predictions.router)
 app.include_router(chat.router)
+app.include_router(chat.router, prefix="/api")
 
 
 @app.on_event("startup")
