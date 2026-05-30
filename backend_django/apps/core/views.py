@@ -1479,17 +1479,30 @@ class GithubAppOauthStartView(APIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
-        state = _build_signed_oauth_state(user_id=getattr(_user_from_bearer_token(request), 'id_user', None))
-        # Redirect to the App installation page instead of plain OAuth authorize.
-        # This installs the App on the user's personal account AND triggers OAuth
-        # (requires "Request user authorization during installation" enabled in the
-        # GitHub App settings). Installation grants the Administration permission
-        # needed for POST /user/repos.
+        user = _user_from_bearer_token(request)
+        state = _build_signed_oauth_state(user_id=getattr(user, 'id_user', None))
         params = {
             "state": state,
             "redirect_uri": settings.GITHUB_APP_OAUTH_CALLBACK_URL,
         }
-        authorize_url = f"https://github.com/apps/{settings.GITHUB_APP_SLUG}/installations/new?{urlencode(params)}"
+
+        # If the user already has the GitHub App installed on their account, skip
+        # the installation page and go straight to OAuth authorization.
+        # Otherwise, send them to the installation page which installs the App AND
+        # triggers OAuth in one step (requires "Request user authorization during
+        # installation" enabled in the GitHub App settings).
+        already_installed = (
+            user is not None
+            and GithubAppInstallation.objects.filter(user=user).exists()
+        )
+        if already_installed:
+            authorize_url = (
+                f"https://github.com/login/oauth/authorize?{urlencode(params)}"
+                f"&client_id={settings.GITHUB_APP_CLIENT_ID}"
+            )
+        else:
+            authorize_url = f"https://github.com/apps/{settings.GITHUB_APP_SLUG}/installations/new?{urlencode(params)}"
+
         return Response({"authorize_url": authorize_url, "state": state}, status=status.HTTP_200_OK)
 
 
@@ -3231,6 +3244,207 @@ class CancelSubscriptionView(APIView):
                 "current_period_end": subscription.current_period_end,
             },
             status=status.HTTP_200_OK,
+        )
+
+
+class GithubRepoBranchesView(APIView):
+    """List branches of a repository accessible via the GitHub App installation."""
+
+    @extend_schema(
+        summary="Listar branches de un repositorio",
+        parameters=[
+            {"name": "repo", "in": "query", "required": True, "schema": {"type": "string"}, "description": "owner/repo"},
+        ],
+        responses={200: dict, 400: dict},
+        tags=["github-ide"],
+    )
+    def get(self, request):
+        repo = request.query_params.get("repo", "").strip()
+        if not repo:
+            return Response({"detail": "El parámetro 'repo' es requerido."}, status=status.HTTP_400_BAD_REQUEST)
+
+        token = self._resolve_token(request, repo)
+        if isinstance(token, Response):
+            return token
+
+        url = f"{GITHUB_API_URL}/repos/{repo}/branches"
+        resp = requests.get(url, headers=_github_headers(token), params={"per_page": 100}, timeout=20)
+        if resp.status_code >= 400:
+            return Response({"detail": "Error al obtener branches.", "github_response": resp.text}, status=status.HTTP_400_BAD_REQUEST)
+
+        branches = [{"name": b["name"], "sha": b["commit"]["sha"]} for b in resp.json()]
+        return Response({"branches": branches})
+
+    @staticmethod
+    def _resolve_token(request, repo: str) -> str | "Response":
+        """Try installation token first, fall back to user OAuth token."""
+        org_login = repo.split("/")[0] if "/" in repo else repo
+        installation = GithubAppInstallation.objects.filter(account_login__iexact=org_login).first()
+        if installation:
+            try:
+                return _installation_access_token(installation.installation_id)
+            except Exception:
+                pass
+        # Fall back to user's OAuth token
+        connection = GithubConnection.objects.filter(user=request.user).first()
+        if not connection:
+            return Response({"detail": "No se encontró instalación ni conexión OAuth para este repositorio."}, status=status.HTTP_400_BAD_REQUEST)
+        token = _get_valid_github_token(connection)
+        if not token:
+            return Response({"detail": "El token de GitHub del usuario expiró."}, status=status.HTTP_400_BAD_REQUEST)
+        return token
+
+
+class GithubCommitFilesView(APIView):
+    """
+    Commit one or more file changes to a GitHub repository branch in a single commit.
+    Uses the Git Data API (blobs + tree + commit + ref update) to support multi-file
+    atomic commits without individual file SHAs from the client.
+    """
+
+    @extend_schema(
+        summary="Commit de archivos al repositorio",
+        request={
+            "application/json": {
+                "type": "object",
+                "required": ["repo", "branch", "message", "files"],
+                "properties": {
+                    "repo": {"type": "string", "description": "owner/repo"},
+                    "branch": {"type": "string", "description": "Branch de destino"},
+                    "message": {"type": "string", "description": "Mensaje del commit"},
+                    "files": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "required": ["path", "content"],
+                            "properties": {
+                                "path": {"type": "string", "description": "Ruta del archivo (ej: src/main.py)"},
+                                "content": {"type": "string", "description": "Contenido textual del archivo"},
+                                "deleted": {"type": "boolean", "description": "Si es true, elimina el archivo"},
+                            },
+                        },
+                    },
+                },
+            }
+        },
+        responses={201: dict, 400: dict},
+        tags=["github-ide"],
+    )
+    def post(self, request):
+        import base64 as b64
+
+        repo = (request.data.get("repo") or "").strip()
+        branch = (request.data.get("branch") or "").strip()
+        message = (request.data.get("message") or "").strip()
+        files = request.data.get("files")
+
+        if not repo or not branch or not message or not files:
+            return Response({"detail": "repo, branch, message y files son requeridos."}, status=status.HTTP_400_BAD_REQUEST)
+        if not isinstance(files, list) or len(files) == 0:
+            return Response({"detail": "'files' debe ser una lista no vacía."}, status=status.HTTP_400_BAD_REQUEST)
+        if len(files) > 50:
+            return Response({"detail": "Máximo 50 archivos por commit."}, status=status.HTTP_400_BAD_REQUEST)
+
+        token = GithubRepoBranchesView._resolve_token(request, repo)
+        if isinstance(token, Response):
+            return token
+
+        headers = _github_headers(token)
+
+        # 1. Get current branch ref (latest commit SHA)
+        ref_resp = requests.get(
+            f"{GITHUB_API_URL}/repos/{repo}/git/refs/heads/{branch}",
+            headers=headers, timeout=20,
+        )
+        if ref_resp.status_code == 404:
+            return Response({"detail": f"Branch '{branch}' no encontrado."}, status=status.HTTP_400_BAD_REQUEST)
+        if ref_resp.status_code >= 400:
+            return Response({"detail": "Error al obtener ref.", "github_response": ref_resp.text}, status=status.HTTP_400_BAD_REQUEST)
+
+        latest_commit_sha = ref_resp.json()["object"]["sha"]
+
+        # 2. Get the tree SHA of the latest commit
+        commit_resp = requests.get(
+            f"{GITHUB_API_URL}/repos/{repo}/git/commits/{latest_commit_sha}",
+            headers=headers, timeout=20,
+        )
+        if commit_resp.status_code >= 400:
+            return Response({"detail": "Error al obtener commit base.", "github_response": commit_resp.text}, status=status.HTTP_400_BAD_REQUEST)
+
+        base_tree_sha = commit_resp.json()["tree"]["sha"]
+
+        # 3. Create blobs for each file and build tree entries
+        tree_entries = []
+        for file_item in files:
+            path = (file_item.get("path") or "").strip().lstrip("/")
+            deleted = bool(file_item.get("deleted", False))
+            if not path:
+                return Response({"detail": "Cada archivo debe tener un 'path'."}, status=status.HTTP_400_BAD_REQUEST)
+
+            if deleted:
+                # Null sha signals deletion in GitHub's tree API
+                tree_entries.append({"path": path, "mode": "100644", "type": "blob", "sha": None})
+                continue
+
+            content = file_item.get("content")
+            if content is None:
+                return Response({"detail": f"El archivo '{path}' no tiene 'content'."}, status=status.HTTP_400_BAD_REQUEST)
+
+            blob_resp = requests.post(
+                f"{GITHUB_API_URL}/repos/{repo}/git/blobs",
+                headers=headers,
+                json={"content": b64.b64encode(content.encode("utf-8")).decode("ascii"), "encoding": "base64"},
+                timeout=20,
+            )
+            if blob_resp.status_code >= 400:
+                return Response({"detail": f"Error creando blob para '{path}'.", "github_response": blob_resp.text}, status=status.HTTP_400_BAD_REQUEST)
+
+            blob_sha = blob_resp.json()["sha"]
+            tree_entries.append({"path": path, "mode": "100644", "type": "blob", "sha": blob_sha})
+
+        # 4. Create a new tree
+        new_tree_resp = requests.post(
+            f"{GITHUB_API_URL}/repos/{repo}/git/trees",
+            headers=headers,
+            json={"base_tree": base_tree_sha, "tree": tree_entries},
+            timeout=20,
+        )
+        if new_tree_resp.status_code >= 400:
+            return Response({"detail": "Error creando árbol.", "github_response": new_tree_resp.text}, status=status.HTTP_400_BAD_REQUEST)
+
+        new_tree_sha = new_tree_resp.json()["sha"]
+
+        # 5. Create the commit
+        new_commit_resp = requests.post(
+            f"{GITHUB_API_URL}/repos/{repo}/git/commits",
+            headers=headers,
+            json={"message": message, "tree": new_tree_sha, "parents": [latest_commit_sha]},
+            timeout=20,
+        )
+        if new_commit_resp.status_code >= 400:
+            return Response({"detail": "Error creando commit.", "github_response": new_commit_resp.text}, status=status.HTTP_400_BAD_REQUEST)
+
+        new_commit_sha = new_commit_resp.json()["sha"]
+        commit_url = new_commit_resp.json().get("html_url") or f"https://github.com/{repo}/commit/{new_commit_sha}"
+
+        # 6. Update the branch reference
+        update_ref_resp = requests.patch(
+            f"{GITHUB_API_URL}/repos/{repo}/git/refs/heads/{branch}",
+            headers=headers,
+            json={"sha": new_commit_sha, "force": False},
+            timeout=20,
+        )
+        if update_ref_resp.status_code >= 400:
+            return Response({"detail": "Error actualizando referencia.", "github_response": update_ref_resp.text}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(
+            {
+                "commit_sha": new_commit_sha,
+                "commit_url": commit_url,
+                "branch": branch,
+                "files_changed": len(tree_entries),
+            },
+            status=status.HTTP_201_CREATED,
         )
 
 
