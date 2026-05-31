@@ -13,7 +13,9 @@ from django.conf import settings
 from django.contrib.auth.hashers import check_password, make_password
 from django.http import HttpResponse, HttpResponseRedirect, JsonResponse, StreamingHttpResponse
 from django.db import models
+from django.db import DatabaseError
 from django.db.models import Q
+from django.utils import timezone as django_timezone
 from drf_spectacular.utils import extend_schema
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
@@ -2353,10 +2355,43 @@ class TaskAIReviewResultViewSet(viewsets.ModelViewSet):
             raise ValidationError({"task": "task es requerido."})
 
         user = self.request.user
-        if task.project.created_by_id != user.id_user and not ProjectMember.objects.filter(project=task.project, user=user).exists():
+        user_id = getattr(user, "id_user", None) or getattr(user, "id", None)
+        if not user_id:
+            raise PermissionDenied("No se pudo identificar al usuario autenticado.")
+
+        if task.project.created_by_id != user_id and not ProjectMember.objects.filter(project=task.project, user_id=user_id).exists():
             raise PermissionDenied("No tienes acceso a esta tarea.")
 
         serializer.save(user=user)
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        try:
+            self.perform_create(serializer)
+        except DatabaseError:
+            task_obj = serializer.validated_data.get("task")
+            provider = serializer.validated_data.get("provider")
+            model_name = serializer.validated_data.get("model_name")
+            result_text = serializer.validated_data.get("result_text")
+            user = request.user
+            user_id = getattr(user, "id_user", None) or getattr(user, "id", None)
+
+            fallback_payload = {
+                "id_review_result": 0,
+                "task": getattr(task_obj, "id_task", None) or getattr(task_obj, "pk", None),
+                "user": user_id,
+                "provider": provider,
+                "model_name": model_name,
+                "result_text": result_text,
+                "created_at": django_timezone.now().isoformat(),
+                "persisted": False,
+            }
+            return Response(fallback_payload, status=status.HTTP_200_OK)
+
+        headers = self.get_success_headers(serializer.data)
+        return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
 
     @extend_schema(
         request={"application/json": {"type": "object", "properties": {"ids": {"type": "array", "items": {"type": "integer"}}}, "required": ["ids"]}},
