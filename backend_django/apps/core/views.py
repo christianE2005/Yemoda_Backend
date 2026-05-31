@@ -3541,6 +3541,35 @@ class GithubChatProxyView(APIView):
         return HttpResponse(upstream.content, status=upstream.status_code, content_type=content_type)
 
 
+class GithubChatCopilotStatusProxyView(APIView):
+    """Proxy Copilot access checks from Django to the FastAPI service."""
+
+    @extend_schema(responses={200: dict, 400: dict, 401: dict, 403: dict, 404: dict, 502: dict}, tags=["chat"])
+    def post(self, request):
+        fastapi_base_url = getattr(settings, "FASTAPI_CHAT_BASE_URL", "https://fast.yemoda.site").rstrip("/")
+        upstream_url = f"{fastapi_base_url}/api/chat/copilot/status"
+        payload = request.data
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": request.headers.get("Accept", "application/json"),
+        }
+
+        auth_header = request.headers.get("Authorization", "").strip()
+        if auth_header:
+            headers["Authorization"] = auth_header
+
+        try:
+            upstream = requests.post(upstream_url, json=payload, headers=headers, timeout=30)
+        except requests.RequestException as exc:
+            return JsonResponse(
+                {"detail": "No se pudo conectar con el servicio de IA de FastAPI.", "error": str(exc)},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        content_type = upstream.headers.get("Content-Type", "application/json")
+        return HttpResponse(upstream.content, status=upstream.status_code, content_type=content_type)
+
+
 class GithubAppDebugView(APIView):
     """Debug endpoint for GitHub App private key — admin only."""
     permission_classes = [IsAdminUser]
