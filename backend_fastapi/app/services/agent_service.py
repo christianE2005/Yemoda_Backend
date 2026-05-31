@@ -261,6 +261,9 @@ You are a precise code review assistant focused exclusively on user story compli
 ## Code changes (diff):
 {diff}
 
+## Changed files context (before/after snapshots):
+{code_context}
+
 ## Instructions:
 Your ONLY job is to determine whether each user story is addressed by the code changes, \
 based strictly on the story title, description, and acceptance criteria.
@@ -327,6 +330,9 @@ You are an expert code reviewer and project manager assistant.
 ## Code changes (diff):
 {diff}
 
+## Changed files context (before/after snapshots):
+{code_context}
+
 ## Instructions:
 Analyze the code changes and determine which user stories are being addressed.
 For each matched story:
@@ -372,6 +378,7 @@ If no stories match the changes, return:
 """
 
 _MAX_DIFF_CHARS = 30_000
+_MAX_CODE_CONTEXT_CHARS = 20_000
 
 
 def analyze_push(
@@ -384,6 +391,7 @@ def analyze_push(
     naming_convention: str = "default",
     response_language: str = "es",
     custom_instructions: str | None = None,
+    code_context: str | None = None,
 ) -> dict[str, Any]:
     """Send stories + diff to Claude and return structured analysis.
 
@@ -397,6 +405,7 @@ def analyze_push(
         naming_convention: One of default / camel_case / pascal_case / snake_case / kebab_case / mixed.
         response_language: 'es' for Spanish or 'en' for English.
         custom_instructions: Optional free-text project-specific rules injected into the prompt.
+        code_context: Optional changed file snapshots (before/after) to improve semantic understanding.
     """
     stories_text = "\n".join(
         f"- ID {s['id']}: {s['title']}\n  Description: {s['description'] or 'No description provided.'}"
@@ -415,6 +424,7 @@ def analyze_push(
         warnings_text = "None."
 
     truncated_diff = diff[:_MAX_DIFF_CHARS]
+    truncated_code_context = (code_context or "None.")[:_MAX_CODE_CONTEXT_CHARS]
 
     lang_instruction = (
         "Write ALL text fields (reason, new_warnings, unaddressed_note) in Spanish."
@@ -439,6 +449,7 @@ def analyze_push(
             stories=stories_text,
             warnings=warnings_text,
             diff=truncated_diff,
+            code_context=truncated_code_context,
             lang_instruction=lang_instruction,
         )
     else:
@@ -453,6 +464,7 @@ def analyze_push(
             stories=stories_text,
             warnings=warnings_text,
             diff=truncated_diff,
+            code_context=truncated_code_context,
             lang_instruction=lang_instruction,
         )
 

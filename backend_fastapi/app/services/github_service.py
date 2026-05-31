@@ -1,5 +1,6 @@
 import os
 import time
+import base64
 
 import httpx
 import jwt as pyjwt
@@ -87,3 +88,57 @@ async def fetch_push_diff(repo_full_name: str, base_sha: str, head_sha: str, ins
     if response.status_code == 200:
         return response.text
     return ""
+
+
+async def fetch_file_content_at_ref(
+    repo_full_name: str,
+    file_path: str,
+    ref: str,
+    installation_id: int | None = None,
+) -> str | None:
+    """Fetch text file content from GitHub Contents API at a specific ref (sha/branch/tag)."""
+    import logging as _logging
+
+    _log = _logging.getLogger(__name__)
+    if not repo_full_name or not file_path or not ref:
+        return None
+
+    if not installation_id:
+        installation_id = await _get_installation_id_for_repo(repo_full_name)
+
+    token: str | None = None
+    if installation_id:
+        try:
+            token = await _get_installation_token(installation_id)
+        except Exception as exc:
+            _log.warning(
+                "Could not get installation token for file content %s (id=%s): %s",
+                repo_full_name,
+                installation_id,
+                exc,
+            )
+            token = None
+
+    headers: dict[str, str] = {"Accept": "application/vnd.github+json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    url = f"{GITHUB_API_URL}/repos/{repo_full_name}/contents/{file_path}"
+    async with httpx.AsyncClient(timeout=20) as client:
+        response = await client.get(url, headers=headers, params={"ref": ref})
+
+    if response.status_code != 200:
+        return None
+
+    data = response.json()
+    if not isinstance(data, dict) or data.get("type") != "file":
+        return None
+
+    raw_content = str(data.get("content") or "").replace("\n", "")
+    if not raw_content:
+        return ""
+
+    try:
+        return base64.b64decode(raw_content).decode("utf-8", errors="replace")
+    except Exception:
+        return None

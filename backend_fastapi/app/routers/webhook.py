@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.core.database import SessionLocal
 from app.services.agent_service import analyze_push
-from app.services.github_service import fetch_push_diff
+from app.services.github_service import fetch_file_content_at_ref, fetch_push_diff
 from app.services.task_service import (
     add_agent_comment,
     create_or_get_push_event,
@@ -34,6 +34,30 @@ router = APIRouter(prefix="/webhook", tags=["agent-webhook"])
 limiter = Limiter(key_func=get_remote_address)
 
 _WEBHOOK_SECRET = os.getenv("GITHUB_APP_WEBHOOK_SECRET", "")
+_MAX_CONTEXT_FILES = 8
+_MAX_FILE_SNAPSHOT_CHARS = 2500
+
+
+def _truncate_text(value: str, max_chars: int) -> str:
+    if len(value) <= max_chars:
+        return value
+    return value[:max_chars] + "\n... [truncado]"
+
+
+def _extract_changed_paths(commits: list[dict]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for commit in commits or []:
+        for key in ("added", "modified", "removed"):
+            for path in commit.get(key) or []:
+                if not isinstance(path, str):
+                    continue
+                normalized = path.strip()
+                if not normalized or normalized in seen:
+                    continue
+                seen.add(normalized)
+                ordered.append(normalized)
+    return ordered
 
 
 def _verify_signature(payload: bytes, signature: str) -> bool:
@@ -98,6 +122,46 @@ async def _run_push_analysis(payload: dict, db: Session) -> None:
 
     logger.info("Got diff (%d chars) — sending to Claude", len(diff))
 
+    changed_paths = _extract_changed_paths(commits)[:_MAX_CONTEXT_FILES]
+    code_context_chunks: list[str] = []
+    for path in changed_paths:
+        old_content: str | None = None
+        new_content: str | None = None
+
+        if before and before != "0" * 40:
+            old_content = await fetch_file_content_at_ref(
+                repo_full_name=repo_full_name,
+                file_path=path,
+                ref=before,
+                installation_id=installation_id,
+            )
+
+        if after and after != "0" * 40:
+            new_content = await fetch_file_content_at_ref(
+                repo_full_name=repo_full_name,
+                file_path=path,
+                ref=after,
+                installation_id=installation_id,
+            )
+
+        if old_content is None and new_content is None:
+            continue
+
+        section_lines = [f"### Archivo: {path}"]
+        if old_content is not None:
+            section_lines.append("#### Antes")
+            section_lines.append("```")
+            section_lines.append(_truncate_text(old_content, _MAX_FILE_SNAPSHOT_CHARS))
+            section_lines.append("```")
+        if new_content is not None:
+            section_lines.append("#### Después")
+            section_lines.append("```")
+            section_lines.append(_truncate_text(new_content, _MAX_FILE_SNAPSHOT_CHARS))
+            section_lines.append("```")
+        code_context_chunks.append("\n".join(section_lines))
+
+    code_context = "\n\n".join(code_context_chunks)
+
     push_event = create_or_get_push_event(
         db,
         project_id=project.id_project,
@@ -124,7 +188,18 @@ async def _run_push_analysis(payload: dict, db: Session) -> None:
     try:
         coding_style, review_focus, tech_stack, naming_convention, response_language, custom_instructions = get_board_review_settings(db, project.id_project)
         logger.info("Board settings loaded for project %s: style=%s, focus=%s, stack=%s, naming=%s, lang=%s, custom=%s", project.id_project, coding_style, review_focus, tech_stack, naming_convention, response_language, bool(custom_instructions))
-        analysis = analyze_push(stories, diff, active_warnings=active_warnings_map, coding_style=coding_style, review_focus=review_focus, tech_stack=tech_stack, naming_convention=naming_convention, response_language=response_language, custom_instructions=custom_instructions)
+        analysis = analyze_push(
+            stories,
+            diff,
+            active_warnings=active_warnings_map,
+            coding_style=coding_style,
+            review_focus=review_focus,
+            tech_stack=tech_stack,
+            naming_convention=naming_convention,
+            response_language=response_language,
+            custom_instructions=custom_instructions,
+            code_context=code_context,
+        )
         logger.info("Analysis complete for project %s (style=%s, focus=%s, stack=%s, naming=%s, lang=%s, custom=%s): %d matches", project.id_project, coding_style, review_focus, tech_stack, naming_convention, response_language, bool(custom_instructions), len(analysis.get("matches", [])))
     except Exception as exc:
         logger.error("Claude analysis failed: %s", exc)
