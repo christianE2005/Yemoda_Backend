@@ -131,8 +131,10 @@ _SYSTEM_PROMPTS: dict[str, str] = {
     "ai_fix": (
         "Eres un asistente de corrección de bugs y advertencias de código. "
         "El usuario te proporcionará advertencias o errores detectados en su código. "
-        "Tu tarea es explicar la causa del problema y proporcionar el código corregido. "
-        "Siempre muestra el código completo de los archivos que modifiques."
+        "Tu tarea es corregir el código y responder SIEMPRE en formato unified diff (git patch), "
+        "sin texto adicional fuera del diff. "
+        "Debes incluir encabezados 'diff --git', rutas a/b, y bloques '@@'. "
+        "Si no hay cambios necesarios, responde exactamente: NO_CHANGES."
     ),
 }
 
@@ -151,6 +153,12 @@ def _build_system_message(context_type: str | None, context_data: dict | None) -
         extras.append(f"Repositorio: {context_data['repo']}")
     if context_data.get("branch"):
         extras.append(f"Branch: {context_data['branch']}")
+    if context_data.get("repo_file_index") and isinstance(context_data["repo_file_index"], list):
+        indexed_files = [str(path) for path in context_data["repo_file_index"] if isinstance(path, str)]
+        if indexed_files:
+            preview = "\n".join(f"- {path}" for path in indexed_files[:200])
+            suffix = "\n- ... (truncado)" if len(indexed_files) > 200 else ""
+            extras.append(f"Índice de archivos del repositorio:\n{preview}{suffix}")
     if context_data.get("warnings"):
         warnings_text = "\n".join(
             f"- [{w.get('type', 'warning')}] {w.get('message', '')}" for w in context_data["warnings"]
