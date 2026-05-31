@@ -118,6 +118,25 @@ def get_active_warnings(db: Session, task_id: int) -> list[TaskWarning]:
 
 
 def create_warning(db: Session, task_id: int, message: str, push_id: int | None = None, severity: str = "warning") -> TaskWarning:
+    normalized_message = " ".join((message or "").split()).strip().lower()
+    existing = (
+        db.query(TaskWarning)
+        .filter(
+            TaskWarning.id_task == task_id,
+            TaskWarning.status == "active",
+            TaskWarning.severity == severity,
+        )
+        .all()
+    )
+    for warning in existing:
+        current_message = " ".join((warning.message or "").split()).strip().lower()
+        if current_message == normalized_message:
+            if push_id is not None and warning.id_push_created != push_id:
+                warning.id_push_created = push_id
+                db.commit()
+                db.refresh(warning)
+            return warning
+
     warning = TaskWarning(
         id_task=task_id,
         message=message,
