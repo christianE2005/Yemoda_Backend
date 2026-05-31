@@ -20,6 +20,7 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 limiter = Limiter(key_func=get_remote_address)
 
 _COPILOT_URL = "https://api.githubcopilot.com/chat/completions"
+_GITHUB_API_URL = "https://api.github.com"
 # Copilot uses OpenAI-compatible models identifiers
 _COPILOT_MODELS = {
     "gpt-4o",
@@ -98,6 +99,17 @@ class ModelInfo(BaseModel):
 class ModelsResponse(BaseModel):
     copilot: list[ModelInfo]
     yemoda: list[ModelInfo]
+
+
+class CopilotStatusRequest(BaseModel):
+    github_token: str = Field(..., min_length=10, description="Token OAuth del usuario de GitHub")
+
+
+class CopilotStatusResponse(BaseModel):
+    github_token_valid: bool
+    copilot_access: bool
+    github_login: str | None = None
+    detail: str
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -347,6 +359,105 @@ def list_models():
     return {
         "copilot": [{"id": m, "provider": "copilot"} for m in sorted(_COPILOT_MODELS)],
         "yemoda": [{"id": m, "provider": "yemoda"} for m in sorted(_ANTHROPIC_MODELS)],
+    }
+
+
+@router.post(
+    "/copilot/status",
+    response_model=CopilotStatusResponse,
+    summary="Verificar si un token GitHub tiene acceso a Copilot",
+)
+@limiter.limit("30/minute")
+async def copilot_status(request: Request, body: CopilotStatusRequest):
+    """
+    Verifica dos cosas:
+    1) si el token OAuth del usuario de GitHub es válido;
+    2) si ese token realmente tiene acceso a GitHub Copilot.
+    """
+    headers = {
+        "Authorization": f"Bearer {body.github_token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        # Step 1: validate token against GitHub user API
+        try:
+            user_resp = await client.get(f"{_GITHUB_API_URL}/user", headers=headers)
+        except httpx.RequestError:
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="No se pudo conectar con GitHub API.")
+
+        if user_resp.status_code == 401:
+            return {
+                "github_token_valid": False,
+                "copilot_access": False,
+                "github_login": None,
+                "detail": "Token de GitHub inválido o expirado.",
+            }
+        if user_resp.status_code >= 400:
+            return {
+                "github_token_valid": False,
+                "copilot_access": False,
+                "github_login": None,
+                "detail": f"GitHub devolvió error al validar token: {user_resp.status_code}.",
+            }
+
+        github_login = (user_resp.json() or {}).get("login")
+
+        # Step 2: verify Copilot entitlement with a minimal completion
+        copilot_headers = {
+            "Authorization": f"Bearer {body.github_token}",
+            "Content-Type": "application/json",
+            "Copilot-Integration-Id": "vscode-chat",
+            "Editor-Version": "vscode/1.90.0",
+        }
+        copilot_payload = {
+            "model": _COPILOT_DEFAULT_MODEL,
+            "messages": [{"role": "user", "content": "ping"}],
+            "max_tokens": 1,
+            "temperature": 0,
+            "stream": False,
+        }
+
+        try:
+            copilot_resp = await client.post(_COPILOT_URL, json=copilot_payload, headers=copilot_headers)
+        except httpx.RequestError:
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="No se pudo conectar con GitHub Copilot API.")
+
+        if copilot_resp.status_code == 401:
+            return {
+                "github_token_valid": True,
+                "copilot_access": False,
+                "github_login": github_login,
+                "detail": "Token válido, pero Copilot rechazó autenticación (401).",
+            }
+        if copilot_resp.status_code == 403:
+            return {
+                "github_token_valid": True,
+                "copilot_access": False,
+                "github_login": github_login,
+                "detail": "Token válido, pero la cuenta no tiene suscripción activa a Copilot.",
+            }
+        if copilot_resp.status_code == 429:
+            return {
+                "github_token_valid": True,
+                "copilot_access": True,
+                "github_login": github_login,
+                "detail": "Cuenta con Copilot, pero alcanzó límite temporal (429).",
+            }
+        if copilot_resp.status_code >= 400:
+            return {
+                "github_token_valid": True,
+                "copilot_access": False,
+                "github_login": github_login,
+                "detail": f"Copilot devolvió error {copilot_resp.status_code}: {copilot_resp.text[:180]}",
+            }
+
+    return {
+        "github_token_valid": True,
+        "copilot_access": True,
+        "github_login": github_login,
+        "detail": "Token válido y acceso a Copilot confirmado.",
     }
 
 

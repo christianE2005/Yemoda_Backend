@@ -2237,8 +2237,8 @@ class GithubRepoContentsView(APIView):
         # Fallback: use the authenticated user's personal OAuth token
         if not token:
             conn = GithubConnection.objects.filter(user=request.user).first()
-            if conn and conn.access_token:
-                token = conn.access_token
+            if conn:
+                token = _get_valid_github_token(conn)
 
         if not token:
             return Response(
