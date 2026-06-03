@@ -111,6 +111,54 @@ def filter_task_subtree(tasks: list[Task], root_id: int) -> list[Task]:
     return result
 
 
+def get_blocked_parent_ids(tasks: list[Task]) -> set[int]:
+    """Parent ids that still have at least one incomplete subtask in the given active set.
+
+    Since `tasks` are the active (incomplete) tasks, any parent referenced by one of them
+    has an unfinished subtask and is therefore NOT ready for AI review yet. Their subtasks
+    are still reviewed individually; only the parent waits until all subtasks are checked.
+    """
+    return {
+        pid
+        for pid in (getattr(t, "id_parent_task", None) for t in tasks)
+        if pid is not None
+    }
+
+
+def get_task(db: Session, task_id: int) -> Task | None:
+    return db.query(Task).filter(Task.id_task == task_id).first()
+
+
+def get_project(db: Session, project_id: int) -> Project | None:
+    return db.query(Project).filter(Project.id_project == project_id).first()
+
+
+def get_subtasks(db: Session, parent_id: int) -> list[Task]:
+    """All subtasks of a task, regardless of completion status."""
+    return db.query(Task).filter(Task.id_parent_task == parent_id).all()
+
+
+def all_subtasks_complete(db: Session, parent_id: int) -> bool:
+    """True when the task has at least one subtask and every subtask is completed."""
+    subtasks = get_subtasks(db, parent_id)
+    if not subtasks:
+        return False
+    return all(s.completed_at is not None for s in subtasks)
+
+
+def get_latest_push_with_diff(db: Session, project_id: int) -> GithubPushEvent | None:
+    """Most recent push event for the project that has a stored diff."""
+    return (
+        db.query(GithubPushEvent)
+        .filter(
+            GithubPushEvent.id_project == project_id,
+            GithubPushEvent.diff_text.isnot(None),
+        )
+        .order_by(GithubPushEvent.received_at.desc())
+        .first()
+    )
+
+
 def build_story_tree(tasks: list[Task]) -> list[dict]:
     """Build a nested story structure from a flat list of active tasks.
 

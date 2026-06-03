@@ -958,6 +958,68 @@ class TaskViewSet(viewsets.ModelViewSet):
             status=status.HTTP_200_OK,
         )
 
+    @extend_schema(
+        request=None,
+        responses={202: dict, 400: dict, 502: dict},
+        tags=["tasks"],
+        summary="Disparar revisión IA de una tarea padre cuyas subtareas están completas",
+        description=(
+            "Pide al servicio de IA que revise la tarea padre usando el último push del "
+            "proyecto. Solo procede si la tarea tiene subtareas y todas están completadas. "
+            "Pensado para llamarse al marcar la última subtarea."
+        ),
+    )
+    @action(detail=True, methods=['post'], url_path='ai-review')
+    def ai_review(self, request, pk=None):
+        task = self.get_object()  # get_queryset already enforces project membership
+
+        subtasks = list(task.subtasks.all())
+        if not subtasks:
+            return Response(
+                {"detail": "La tarea no tiene subtareas; no aplica la revisión por completitud."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        open_subtasks = [s for s in subtasks if s.completed_at is None]
+        if open_subtasks:
+            return Response(
+                {"detail": f"Aún hay {len(open_subtasks)} subtarea(s) sin completar.", "open_subtasks": len(open_subtasks)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        base = (settings.FASTAPI_CHAT_BASE_URL or "").rstrip("/")
+        if not base:
+            return Response(
+                {"detail": "El servicio de IA no está configurado (FASTAPI_CHAT_BASE_URL)."},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        try:
+            resp = requests.post(
+                f"{base}/webhook/review-task/",
+                json={"project_id": task.project_id, "task_id": task.id_task},
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Internal-Token": settings.GITHUB_APP_WEBHOOK_SECRET or "",
+                },
+                timeout=5,
+            )
+        except requests.RequestException as exc:
+            return Response(
+                {"detail": "No se pudo contactar al servicio de IA.", "error": str(exc)},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        if resp.status_code >= 400:
+            return Response(
+                {"detail": "El servicio de IA rechazó la solicitud.", "status": resp.status_code},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        return Response(
+            {"detail": "Revisión con IA solicitada. La tarea se actualizará en segundo plano."},
+            status=status.HTTP_202_ACCEPTED,
+        )
+
 
 class TaskCommentViewSet(viewsets.ModelViewSet):
     queryset = TaskComment.objects.all()
