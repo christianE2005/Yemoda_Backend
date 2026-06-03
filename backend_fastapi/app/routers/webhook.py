@@ -15,9 +15,11 @@ from app.services.agent_service import analyze_push
 from app.services.github_service import fetch_file_content_at_ref, fetch_push_diff
 from app.services.task_service import (
     add_agent_comment,
+    build_story_tree,
     create_or_get_push_event,
     create_push_match,
     create_warning,
+    filter_task_subtree,
     get_active_tasks,
     get_active_warnings,
     get_board_review_settings,
@@ -106,13 +108,14 @@ async def _run_push_analysis(payload: dict, db: Session) -> None:
         logger.info("No active tasks for project %s — skipping analysis", project.id_project)
         return
 
-    # Branch-based task routing: if branch matches {task_id}-... only evaluate that task
+    # Branch-based task routing: if branch matches {task_id}-... only evaluate that task.
+    # When the targeted task is a parent, its active subtasks are pulled in too so the
+    # agent reviews the whole breakdown together.
     if is_task_branch:
         targeted_id = int(task_id_match.group(1))
-        targeted = [t for t in tasks if t.id_task == targeted_id]
-        if targeted:
-            tasks = targeted
-            logger.info("Branch '%s' targets task %d — running targeted single-task analysis", branch_name, targeted_id)
+        if any(t.id_task == targeted_id for t in tasks):
+            tasks = filter_task_subtree(tasks, targeted_id)
+            logger.info("Branch '%s' targets task %d — running targeted analysis on %d task(s) (incl. subtasks)", branch_name, targeted_id, len(tasks))
 
     logger.info("Fetching diff for %s (%s...%s) installation_id=%s", repo_full_name, before[:7], after[:7], installation_id)
     diff = await fetch_push_diff(repo_full_name, before, after, installation_id)
@@ -172,10 +175,9 @@ async def _run_push_analysis(payload: dict, db: Session) -> None:
         diff_text=diff,
     )
 
-    stories = [
-        {"id": t.id_task, "title": t.title, "description": t.description}
-        for t in tasks
-    ]
+    # Nest subtasks under their parent so the agent sees the task hierarchy.
+    # Matching below still uses the flat `tasks` list, so a match can target any node.
+    stories = build_story_tree(tasks)
 
     active_warnings_map: dict[int, list[dict]] = {}
     for t in tasks:

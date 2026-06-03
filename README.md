@@ -152,7 +152,7 @@ El JWT contiene: `user_id`, `email`, `username`, `is_admin`, `system_role_id`.
 | Tags | `/api/tags/` | GET, POST, PUT, PATCH, DELETE | `?project=` |
 | Estados de tarea | `/api/task-statuses/` | GET, POST, PUT, PATCH, DELETE | — |
 | Prioridades de tarea | `/api/task-priorities/` | GET, POST, PUT, PATCH, DELETE | — |
-| Tareas | `/api/tasks/` | GET, POST, PUT, PATCH, DELETE | `?project=`, `?sprint=`, `?board_column=`, `?milestone=`, `?tag=`, `?backlog=true` |
+| Tareas | `/api/tasks/` | GET, POST, PUT, PATCH, DELETE | `?project=`, `?sprint=`, `?board_column=`, `?milestone=`, `?tag=`, `?backlog=true`, `?parent=`, `?top_level=true` |
 | Asignaciones de tarea | `/api/task-assignments/` | GET, POST, PUT, PATCH, DELETE | `?task=`, `?user=` |
 | Comentarios de tarea | `/api/task-comments/` | GET, POST, PUT, PATCH, DELETE | `?task=` |
 | Logs de actividad | `/api/activity-logs/` | GET (solo lectura) | — |
@@ -247,6 +247,38 @@ Respuesta `201`:
 
 > Cuando alguien hace push a una rama `{task_id}-*`, el agente analiza **únicamente esa tarea** en lugar de todas las del proyecto.
 
+#### Subtareas y tareas épicas
+
+Las tareas soportan jerarquía mediante el campo auto-referencial `parent`. Una tarea con `parent` es una **subtarea**; una tarea con subtareas funciona como **historia o épica** que agrupa el trabajo. La jerarquía admite **profundidad arbitraria** (épica → historia → subtarea → …) reusando la misma tabla `task`, por lo que las subtareas heredan todo: asignados, comentarios, warnings de IA, ramas Git y push matches.
+
+**Crear una subtarea** — `POST /api/tasks/` con el campo `parent`:
+```json
+{ "project": 1, "title": "Validar formulario de login", "parent": 42 }
+```
+
+**Filtros nuevos en `GET /api/tasks/`:**
+
+| Parámetro | Descripción |
+|-----------|-------------|
+| `?parent=42` | Lista las subtareas directas de la tarea 42 |
+| `?top_level=true` | Lista solo tareas sin padre (épicas/tareas independientes) |
+
+**Campos calculados en la respuesta de cada tarea:**
+
+| Campo | Descripción |
+|-------|-------------|
+| `subtask_progress` | `{ "total", "completed", "percent" }` sobre las subtareas directas |
+| `rolled_up_points` | Suma de `story_points` de las **hojas** descendientes (solo las hojas llevan puntos reales; el padre los acumula) |
+
+**Reglas de negocio:**
+
+- **Bloqueo de cierre:** una tarea padre **no puede moverse a una columna final** (completarse) mientras tenga subtareas sin terminar → responde `400`.
+- **Sin ciclos:** una tarea no puede ser su propia subtarea ni asignarse como padre a uno de sus descendientes.
+- **Mismo proyecto:** el `parent` debe pertenecer al mismo proyecto.
+- **Borrado en cascada:** eliminar una tarea padre elimina sus subtareas (`ON DELETE CASCADE`).
+- **ML:** el modelo de riesgo cuenta puntos **solo de las hojas** para no duplicar la velocidad del proyecto.
+- **Agente IA:** al analizar un push, las subtareas se envían a Claude **anidadas bajo su padre**, y una rama `{id_padre}-...` arrastra al análisis también a sus subtareas activas.
+
 #### Warnings de IA
 
 | Método | Endpoint | Auth | Descripción |
@@ -296,7 +328,7 @@ Cada warning incluye el campo `severity`:
 | `tag` | Etiquetas reutilizables por proyecto |
 | `task_status` | Estados: Backlog, To Do, In Progress, Review, Done |
 | `task_priority` | Prioridades: Low, Medium, High, Critical |
-| `task` | Tareas con sprint, columna de tablero, milestone, tags, fecha límite y `scrum_number` (story points) |
+| `task` | Tareas con sprint, columna de tablero, milestone, tags, fecha límite y `scrum_number` (story points). Campo `parent` (auto-referencia) para **subtareas/épicas**: una tarea con `parent` es subtarea; soporta jerarquía a cualquier profundidad (épica → historia → subtarea) |
 | `task_assignment` | Asignaciones de usuarios a tareas (M2M explícita) |
 | `task_comment` | Comentarios en tareas (también los genera la IA automáticamente) |
 | `task_push_match` | Relación tarea↔push generada por el agente IA |

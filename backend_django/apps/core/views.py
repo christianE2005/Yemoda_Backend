@@ -879,12 +879,21 @@ class TaskViewSet(viewsets.ModelViewSet):
         # ?backlog=true returns all tasks of the project regardless of sprint assignment
         # (Product Backlog = all tasks; sprint tasks are still part of the backlog)
 
+        # ?parent=<id> returns the subtasks of a given task.
+        # ?top_level=true returns only tasks without a parent (epics/standalone tasks).
+        parent_id = self.request.query_params.get('parent')
+        if parent_id is not None:
+            qs = qs.filter(parent_id=parent_id)
+
+        top_level = self.request.query_params.get('top_level')
+        if top_level is not None and top_level.lower() in ('1', 'true', 'yes'):
+            qs = qs.filter(parent__isnull=True)
 
         tag_id = self.request.query_params.get('tag')
         if tag_id is not None:
             qs = qs.filter(tags__id_tag=tag_id)
 
-        return qs.distinct().prefetch_related('assignments__assigned_to', 'tags')
+        return qs.distinct().prefetch_related('assignments__assigned_to', 'tags', 'subtasks')
 
     @extend_schema(
         responses={200: dict},

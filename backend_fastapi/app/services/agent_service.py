@@ -381,6 +381,24 @@ _MAX_DIFF_CHARS = 30_000
 _MAX_CODE_CONTEXT_CHARS = 20_000
 
 
+def _format_stories(stories: list[dict[str, Any]], level: int = 0) -> str:
+    """Render the (possibly nested) story tree as an indented text block.
+
+    A parent task is shown with its subtasks indented beneath it. Works for a flat
+    list too (a story with no 'subtasks' key is treated as a leaf).
+    """
+    lines: list[str] = []
+    pad = "  " * level
+    for s in stories:
+        lines.append(f"{pad}- ID {s['id']}: {s['title']}")
+        lines.append(f"{pad}  Description: {s.get('description') or 'No description provided.'}")
+        subtasks = s.get("subtasks") or []
+        if subtasks:
+            lines.append(f"{pad}  Subtasks (this task is only fully done when its subtasks are):")
+            lines.append(_format_stories(subtasks, level + 2))
+    return "\n".join(line for line in lines if line)
+
+
 def analyze_push(
     stories: list[dict[str, Any]],
     diff: str,
@@ -407,10 +425,7 @@ def analyze_push(
         custom_instructions: Optional free-text project-specific rules injected into the prompt.
         code_context: Optional changed file snapshots (before/after) to improve semantic understanding.
     """
-    stories_text = "\n".join(
-        f"- ID {s['id']}: {s['title']}\n  Description: {s['description'] or 'No description provided.'}"
-        for s in stories
-    )
+    stories_text = _format_stories(stories)
 
     if active_warnings:
         warnings_lines = []

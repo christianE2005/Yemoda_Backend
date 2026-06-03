@@ -82,6 +82,61 @@ def get_active_tasks(db: Session, project_id: int) -> list[Task]:
     )
 
 
+def filter_task_subtree(tasks: list[Task], root_id: int) -> list[Task]:
+    """Return the task with id root_id plus all of its descendants found in tasks.
+
+    Used for task-targeted branches ({task_id}-...): when the branch targets a
+    parent task we also pull its active subtasks so the agent sees the breakdown.
+    """
+    by_id = {t.id_task: t for t in tasks}
+    children: dict[int, list[Task]] = {}
+    for t in tasks:
+        parent_id = getattr(t, "id_parent_task", None)
+        if parent_id is not None:
+            children.setdefault(parent_id, []).append(t)
+
+    result: list[Task] = []
+    seen: set[int] = set()
+    stack = [root_id]
+    while stack:
+        tid = stack.pop()
+        if tid in seen:
+            continue
+        seen.add(tid)
+        task = by_id.get(tid)
+        if task is not None:
+            result.append(task)
+        for child in children.get(tid, []):
+            stack.append(child.id_task)
+    return result
+
+
+def build_story_tree(tasks: list[Task]) -> list[dict]:
+    """Build a nested story structure from a flat list of active tasks.
+
+    Each node is {id, title, description, subtasks: [...]}. A subtask is nested
+    under its parent when the parent is also in the list; otherwise it becomes a
+    root. This lets the agent reason about a parent task together with its subtasks.
+    """
+    nodes = {
+        t.id_task: {
+            "id": t.id_task,
+            "title": t.title,
+            "description": t.description,
+            "subtasks": [],
+        }
+        for t in tasks
+    }
+    roots: list[dict] = []
+    for t in tasks:
+        parent_id = getattr(t, "id_parent_task", None)
+        if parent_id is not None and parent_id in nodes:
+            nodes[parent_id]["subtasks"].append(nodes[t.id_task])
+        else:
+            roots.append(nodes[t.id_task])
+    return roots
+
+
 def get_review_column(db: Session, project_id: int) -> BoardColumn | None:
     """Find the board column marked as is_review in any board of the project."""
     return (

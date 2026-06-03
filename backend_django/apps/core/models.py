@@ -347,6 +347,18 @@ class Task(models.Model):
         db_column="id_project",
         related_name="tasks",
     )
+    parent = models.ForeignKey(
+        "self",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        db_column="id_parent_task",
+        related_name="subtasks",
+        help_text=(
+            "Parent task. A task with a parent is a subtask. Supports arbitrary depth "
+            "(epic -> story -> subtask). Deleting a parent cascades to its subtasks."
+        ),
+    )
     sprint = models.ForeignKey(
         Sprint,
         on_delete=models.SET_NULL,

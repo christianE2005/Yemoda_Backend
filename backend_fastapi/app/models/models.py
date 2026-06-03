@@ -141,6 +141,11 @@ class Task(Base):
         nullable=True,
     )
     id_sprint: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    id_parent_task: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("task.id_task", ondelete="CASCADE"),
+        nullable=True,
+    )
     title: Mapped[str] = mapped_column(String(200), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     id_priority: Mapped[int | None] = mapped_column(

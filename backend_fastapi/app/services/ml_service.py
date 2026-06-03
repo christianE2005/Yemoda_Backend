@@ -70,15 +70,24 @@ def _extract_features(db: Session, project_id: int, reference_date: date | None 
     days_remaining = (end_date - ref).days if end_date else None
 
     # ── Task aggregates ───────────────────────────────────────────────────────
-    # COALESCE(scrum_number, 1): defaults to 1 point when column is NULL / not yet added
+    # COALESCE(scrum_number, 1): defaults to 1 point when column is NULL / not yet added.
+    # Only LEAF tasks (no subtasks) contribute points — a parent task's points are the
+    # sum of its leaves, so counting both would double-count. The NOT EXISTS clause
+    # restricts the point sums to leaves while task COUNTs still cover everything.
     tasks_row = db.execute(
         text("""
             SELECT
                 COUNT(*)                                                        AS total_tasks,
                 COUNT(*) FILTER (WHERE completed_at IS NOT NULL)                AS completed_tasks,
-                COALESCE(SUM(COALESCE(scrum_number, 1)), 0)                     AS total_points,
-                COALESCE(SUM(COALESCE(scrum_number, 1))
-                    FILTER (WHERE completed_at IS NOT NULL), 0)                 AS completed_points
+                COALESCE(SUM(COALESCE(scrum_number, 1)) FILTER (
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM task c WHERE c.id_parent_task = task.id_task
+                    )), 0)                                                      AS total_points,
+                COALESCE(SUM(COALESCE(scrum_number, 1)) FILTER (
+                    WHERE completed_at IS NOT NULL
+                      AND NOT EXISTS (
+                        SELECT 1 FROM task c WHERE c.id_parent_task = task.id_task
+                    )), 0)                                                      AS completed_points
             FROM task
             WHERE id_project = :pid
               AND created_at <= :ref_ts
@@ -107,6 +116,9 @@ def _extract_features(db: Session, project_id: int, reference_date: date | None 
             FROM task
             WHERE id_project = :pid
               AND completed_at IS NOT NULL
+              AND NOT EXISTS (
+                  SELECT 1 FROM task c WHERE c.id_parent_task = task.id_task
+              )
         """),
         {
             "pid": project_id,
@@ -153,6 +165,9 @@ def _extract_features(db: Session, project_id: int, reference_date: date | None 
               AND completed_at IS NOT NULL
               AND completed_at >= :eight_weeks_ago
               AND completed_at < :ref_ts
+              AND NOT EXISTS (
+                  SELECT 1 FROM task c WHERE c.id_parent_task = task.id_task
+              )
             GROUP BY DATE_TRUNC('week', completed_at)
         """),
         {

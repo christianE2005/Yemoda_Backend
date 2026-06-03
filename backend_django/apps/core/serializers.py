@@ -160,8 +160,32 @@ class TaskAssignedUserSerializer(serializers.Serializer):
     id_assignment = serializers.IntegerField()
 
 
+def _sum_leaf_points(task, _depth=0):
+    """
+    Sum story_points across the leaf descendants of a task.
+
+    Only leaf tasks (no subtasks) carry real points; a parent rolls up the points
+    of its leaves. Returns the task's own story_points when it has no subtasks.
+    The depth guard protects against accidentally cyclic data.
+    """
+    if _depth > 20:
+        return 0
+    subtasks = list(task.subtasks.all())
+    if not subtasks:
+        return task.story_points or 0
+    return sum(_sum_leaf_points(s, _depth + 1) for s in subtasks)
+
+
+class SubtaskProgressSerializer(serializers.Serializer):
+    total = serializers.IntegerField()
+    completed = serializers.IntegerField()
+    percent = serializers.IntegerField()
+
+
 class TaskSerializer(serializers.ModelSerializer):
     assigned_users = serializers.SerializerMethodField()
+    subtask_progress = serializers.SerializerMethodField()
+    rolled_up_points = serializers.SerializerMethodField()
 
     class Meta:
         model = Task
@@ -181,14 +205,38 @@ class TaskSerializer(serializers.ModelSerializer):
             for assignment in assignments
         ]
 
+    @extend_schema_field(SubtaskProgressSerializer)
+    def get_subtask_progress(self, obj):
+        """Completion progress over direct subtasks (immediate children)."""
+        subtasks = list(obj.subtasks.all())
+        total = len(subtasks)
+        if total == 0:
+            return {"total": 0, "completed": 0, "percent": 0}
+        completed = sum(1 for s in subtasks if s.completed_at is not None)
+        return {
+            "total": total,
+            "completed": completed,
+            "percent": round(completed * 100 / total),
+        }
+
+    @extend_schema_field(serializers.IntegerField(allow_null=True))
+    def get_rolled_up_points(self, obj):
+        """
+        Points for a task. Only leaf tasks carry their own points; a parent's
+        value is the sum of its leaf descendants' story_points. Returns the task's
+        own story_points when it has no subtasks.
+        """
+        return _sum_leaf_points(obj)
+
     def validate_story_points(self, value):
         if value is not None and value < 1:
             raise serializers.ValidationError("story_points debe ser al menos 1.")
         return value
 
     def validate(self, attrs):
-        scrum_number = attrs.get('scrum_number')
         project = attrs.get('project') or (self.instance.project if self.instance else None)
+
+        scrum_number = attrs.get('scrum_number')
         if scrum_number is not None and project is not None:
             qs = Task.objects.filter(project=project, scrum_number=scrum_number)
             if self.instance:
@@ -197,6 +245,52 @@ class TaskSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError(
                     {"scrum_number": "Ya existe una tarea con ese número en este proyecto."}
                 )
+
+        # ── Parent / subtask validation ──────────────────────────────────────
+        parent = attrs.get('parent', serializers.empty)
+        if parent is not serializers.empty and parent is not None:
+            if self.instance and parent.pk == self.instance.pk:
+                raise serializers.ValidationError(
+                    {"parent": "Una tarea no puede ser su propia subtarea."}
+                )
+            if project is not None and parent.project_id != project.id_project:
+                raise serializers.ValidationError(
+                    {"parent": "La tarea padre debe pertenecer al mismo proyecto."}
+                )
+            # Prevent cycles: the chosen parent cannot be a descendant of this task.
+            if self.instance:
+                ancestor = parent
+                seen = set()
+                while ancestor is not None and ancestor.pk not in seen:
+                    if ancestor.pk == self.instance.pk:
+                        raise serializers.ValidationError(
+                            {"parent": "No se puede asignar como padre a una de sus propias subtareas (ciclo)."}
+                        )
+                    seen.add(ancestor.pk)
+                    ancestor = ancestor.parent
+
+        # ── Completion blocking: a parent cannot be MOVED to a final column while
+        #    it still has incomplete subtasks. Only enforced when board_column is
+        #    explicitly provided (a transition), so unrelated edits on a task that
+        #    already sits in a final column are not blocked. ──────────────────────
+        board_column = attrs.get('board_column', serializers.empty)
+        moving_to_final = (
+            board_column is not serializers.empty
+            and board_column is not None
+            and board_column.is_final
+        )
+        if moving_to_final and self.instance is not None:
+            already_final = bool(self.instance.board_column and self.instance.board_column.is_final)
+            if not already_final:
+                open_subtasks = self.instance.subtasks.filter(completed_at__isnull=True).count()
+                if open_subtasks > 0:
+                    raise serializers.ValidationError(
+                        {"board_column": (
+                            f"No se puede completar la tarea: tiene {open_subtasks} subtarea(s) "
+                            "sin terminar. Completa o reasigna las subtareas primero."
+                        )}
+                    )
+
         return attrs
 
 
