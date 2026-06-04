@@ -54,7 +54,7 @@ def seed_project_roles(apps, schema_editor):
 
         # Contributor move cap: the review column, else the last non-final column.
         cols = list(
-            BoardColumn.objects.filter(board__id_project=project.id_project).order_by("order")
+            BoardColumn.objects.filter(board__project_id=project.id_project).order_by("order")
         )
         review_col = next((c for c in cols if c.is_review), None)
         cap_col = review_col or next((c for c in reversed(cols) if not c.is_final), None)
