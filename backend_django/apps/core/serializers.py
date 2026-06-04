@@ -123,6 +123,7 @@ class ProjectMemberSerializer(serializers.ModelSerializer):
     class Meta:
         model = ProjectMember
         fields = "__all__"
+        read_only_fields = ("id", "joined_at")
 
 
 class BoardSerializer(serializers.ModelSerializer):
@@ -353,6 +354,8 @@ class TaskAIReviewResultSerializer(serializers.ModelSerializer):
     class Meta:
         model = TaskAIReviewResult
         fields = "__all__"
+        # `user` is set from the authenticated caller in the view, never from the client.
+        read_only_fields = ("id_review_result", "user", "created_at")
 
 
 class GithubRepoSerializer(serializers.ModelSerializer):

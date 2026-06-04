@@ -89,9 +89,9 @@ Swagger UI: `http://127.0.0.1:8001/api/docs/`
 
 | Variable | Descripción |
 |----------|-------------|
-| `DJANGO_SECRET_KEY` | Clave secreta de Django |
-| `DJANGO_DEBUG` | `True` en desarrollo, `False` en producción |
-| `DJANGO_ALLOWED_HOSTS` | Hosts permitidos separados por coma |
+| `DJANGO_SECRET_KEY` | **Requerido en producción.** Si falta se usa una clave aleatoria por proceso (nunca la antigua `change-me`); configúrala **estable** para que los JWT sobrevivan reinicios/múltiples instancias. |
+| `DJANGO_DEBUG` | **Default `false`** (producción segura). Pon `true` solo en desarrollo local — expone páginas de error y la documentación Swagger. |
+| `DJANGO_ALLOWED_HOSTS` | Hosts permitidos separados por coma. **Requerido en producción** (con `DEBUG=false` el default es solo `localhost,127.0.0.1`; en Railway se añaden los hosts internos automáticamente). |
 | `DB_HOST` | Host PostgreSQL |
 | `DB_PORT` | Puerto PostgreSQL (default `5432`) |
 | `DB_NAME` | Nombre de la base de datos |
@@ -102,14 +102,15 @@ Swagger UI: `http://127.0.0.1:8001/api/docs/`
 | `JWT_EXPIRE_MINUTES` | Minutos de expiración del access token |
 | `JWT_REFRESH_EXPIRE_MINUTES` | Minutos de expiración del refresh token |
 | `CORS_ALLOWED_ORIGINS` | Orígenes CORS separados por coma (sin slash final) |
-| `CORS_ALLOW_ALL_ORIGINS` | `true` para dev, `false` para prod |
+| `CORS_ALLOW_ALL_ORIGINS` | `false` por defecto. Las credenciales cross-origin están deshabilitadas (la auth es por Bearer token, no cookies). |
+| `EMAIL_VERIFICATION_GRACE_DAYS` | Días que una cuenta sin verificar puede usar la API antes de bloquearse (default `3`). |
 | `GITHUB_APP_ID` | ID numérico de la GitHub App |
 | `GITHUB_APP_SLUG` | Slug de la GitHub App |
 | `GITHUB_APP_CLIENT_ID` | Client ID de la GitHub App |
 | `GITHUB_APP_CLIENT_SECRET` | Client Secret de la GitHub App |
 | `GITHUB_APP_OAUTH_CALLBACK_URL` | URL de callback OAuth |
 | `GITHUB_APP_PRIVATE_KEY` | Llave privada RSA de la GitHub App (con saltos de línea reales) |
-| `GITHUB_APP_WEBHOOK_SECRET` | Secret para validar webhooks entrantes |
+| `GITHUB_APP_WEBHOOK_SECRET` | **Requerido.** Valida la firma HMAC-SHA256 de los webhooks (**fail-closed**: sin él, los webhooks se rechazan) y actúa como token interno compartido Django↔FastAPI. |
 | `GITHUB_APP_WEBHOOK_TARGET_URL` | URL del FastAPI que recibe los webhooks reenviados |
 
 ### Autenticación
@@ -279,6 +280,33 @@ Las tareas soportan jerarquía mediante el campo auto-referencial `parent`. Una 
 - **ML:** el modelo de riesgo cuenta puntos **solo de las hojas** para no duplicar la velocidad del proyecto.
 - **Agente IA:** al analizar un push, las subtareas se envían a Claude **anidadas bajo su padre**, y una rama `{id_padre}-...` arrastra al análisis también a sus subtareas activas.
 
+#### Roles y permisos personalizados (por proyecto)
+
+Cada proyecto tiene su propio conjunto de **roles personalizados** que el **creador del proyecto** gestiona. La autorización se aplica **en el backend** (no solo en la UI). Al crear un proyecto se siembran 4 roles por defecto editables:
+
+| Rol | Permisos |
+|-----|----------|
+| **Admin** | Acceso total (no editable ni eliminable). |
+| **Editor** | Crear/editar/borrar y mover tareas, gestionar sprints, milestones, tags, comentar, disparar IA. |
+| **Contributor** | Crear/editar y **mover tareas hasta la columna de Review**, comentar, disparar IA. |
+| **Viewer** | Solo lectura. |
+
+**Permisos granulares** (booleanos): `can_create_tasks`, `can_edit_tasks`, `can_delete_tasks`, `can_move_tasks`, `can_manage_sprints`, `can_manage_board`, `can_manage_milestones`, `can_manage_tags`, `can_comment`, `can_manage_members`, `can_manage_project`, `can_trigger_ai`. Además, `max_move_column` limita **hasta qué columna del tablero** puede mover tareas un rol (`null` = sin límite).
+
+| Método | Endpoint | Auth | Descripción |
+|--------|----------|------|-------------|
+| GET | `/api/project-roles/?project={id}` | ✅ Miembro | Lista los roles del proyecto |
+| POST | `/api/project-roles/` | ✅ Admin proyecto | Crea un rol personalizado |
+| PATCH | `/api/project-roles/{id}/` | ✅ Admin proyecto | Edita un rol (el rol Admin no es editable) |
+| DELETE | `/api/project-roles/{id}/` | ✅ Admin proyecto | Elimina un rol (el rol Admin no se puede borrar) |
+| GET | `/api/projects/{id}/my-permissions/` | ✅ Miembro | Capacidades resueltas del usuario actual (para gatear la UI) |
+
+- El rol de un miembro se asigna con `project_role` en `POST/PATCH /api/project-members/` o el `project_role_id` del endpoint anidado `POST /api/projects/{id}/members/`.
+- **Solo un admin del proyecto** puede asignar el rol **Admin** (evita escalada vía `can_manage_members`).
+- El **creador del proyecto** (y los admins de sistema) siempre tienen acceso total.
+
+> El frontend incluye **RoleStudio**, una UI para crear/editar roles con modo Simple (por área) y Avanzado (por acción), y una visualización del límite de columnas ("hasta dónde puede mover tareas el rol").
+
 #### Warnings de IA
 
 | Método | Endpoint | Auth | Descripción |
@@ -385,7 +413,7 @@ Docs: `http://127.0.0.1:8002/docs`
 | `ANTHROPIC_API_KEY` | API key de Anthropic (Claude) |
 | `GITHUB_APP_ID` | ID de la GitHub App (mismo que Django) |
 | `GITHUB_APP_PRIVATE_KEY` | Llave privada RSA de la GitHub App |
-| `GITHUB_APP_WEBHOOK_SECRET` | Secret para validar firmas HMAC-SHA256 de webhooks |
+| `GITHUB_APP_WEBHOOK_SECRET` | **Requerido.** Valida firmas HMAC-SHA256 (fail-closed) y se exige como header `X-Internal-Token` en `/webhook/review-task/` y `/predictions/*` (endpoints server-to-server). |
 
 ### Endpoints FastAPI
 
@@ -500,7 +528,37 @@ Reentrena el modelo bajo demanda. Requiere al menos **3 proyectos** con `status=
 
 ## Seguridad
 
-- No subir `.env` al repositorio (en `.gitignore`)
-- Usar secretos distintos para `DJANGO_SECRET_KEY` y `JWT_SECRET_KEY`
-- El endpoint de instalación de GitHub App (`/api/github/app/install/start/`) requiere rol **Admin** (`system_role_id=1`)
-- Los webhooks de GitHub se validan con firma HMAC-SHA256 tanto en Django como en FastAPI
+Controles aplicados (auditoría de seguridad — críticos, altos, medios y bajos remediados):
+
+### Autenticación y sesiones
+- **JWT con revocación**: cada usuario tiene un `token_version`; los JWT lo incluyen como claim `tv`. Al **cambiar la contraseña** se incrementa, invalidando todos los tokens previos (access + refresh). El endpoint de cambio de contraseña devuelve tokens frescos para no desloguear al cliente actual.
+- **Tokens OAuth en el fragmento de URL (`#`)**, no en el query string — los callbacks de Google/GitHub entregan los tokens en `#…` (no se envían al servidor → sin fuga por `Referer`/logs) y el frontend los limpia del historial tras consumirlos.
+- **Verificación de email**: ventana de gracia para cuentas sin verificar configurable y corta (`EMAIL_VERIFICATION_GRACE_DAYS`, default 3 días).
+- `DJANGO_SECRET_KEY`/`JWT_SECRET_KEY` nunca usan una clave pública por defecto; si faltan se genera una aleatoria por proceso (configúralas estables en producción).
+
+### Autorización (RBAC por proyecto)
+- **Roles personalizados por proyecto** con permisos granulares (ver más abajo), **aplicados en el backend** (403 real) en tareas, sprints, tablero, miembros, ajustes e IA — no solo en la UI.
+- El rol **Admin** solo lo puede **otorgar un admin del proyecto** (no escalable vía `can_manage_members`).
+- **Acceso a repos de GitHub** (`/contents/`, `/commits/diff/`, `/branches/`, `/commit/`) exige que el repo pertenezca a un proyecto del usuario — sin esto, cualquiera podía leer/escribir repos de otras organizaciones.
+- Los endpoints de GitHub usan **`request.user`**, nunca un `user_id` del body (se eliminó la suplantación de identidad).
+- El historial de push de una tarea (`/tasks/{id}/history/`) requiere membresía del proyecto.
+
+### Webhooks, servicios internos y red
+- Webhooks de GitHub validados con HMAC-SHA256 en Django **y** FastAPI, **fail-closed**: si falta `GITHUB_APP_WEBHOOK_SECRET`, se rechazan (antes se aceptaban sin firma).
+- Endpoints server-to-server de FastAPI (`/webhook/review-task/`, `/predictions/*`) exigen `X-Internal-Token` == `GITHUB_APP_WEBHOOK_SECRET`.
+- El webhook del repo se registra siempre contra `GITHUB_APP_WEBHOOK_TARGET_URL` del servidor (se ignora cualquier `webhook_url` del cliente).
+- **Pendiente (infra)**: el host de FastAPI no debe ser accesible directo desde internet — `/chat/*` lo alcanza el navegador vía gateway/Django; aíslalo o valida el JWT del usuario ahí.
+
+### Exposición de información
+- Se eliminó el endpoint `/debug/` de FastAPI (filtraba estructura de la llave privada **sin auth**); `GithubAppDebugView` (admin) ya no devuelve fragmentos de llave ni traceback; `ProjectViewSet.create` no devuelve stack traces al cliente.
+- Las respuestas de error ya no incluyen el cuerpo crudo de la API de GitHub (`github_response`) — solo mensajes genéricos; el detalle se registra server-side.
+- `DEBUG=false` por defecto oculta páginas de error y la documentación Swagger en producción.
+- Búsqueda de usuarios con throttle dedicado (`user_search`) para frenar la enumeración de emails.
+
+### Configuración
+- No subir `.env` al repositorio (en `.gitignore`); usar secretos distintos para `DJANGO_SECRET_KEY` y `JWT_SECRET_KEY`.
+- CORS: `CORS_ALLOW_ALL_ORIGINS=false` por defecto y **credenciales cross-origin deshabilitadas** (auth por Bearer, no cookies).
+- El endpoint de instalación de GitHub App (`/api/github/app/install/start/`) requiere rol **Admin** (`system_role_id=1`).
+- `/api/roles/` requiere autenticación (ya no es público).
+
+> **Nota de localStorage (pendiente/opcional):** el frontend guarda los JWT en `localStorage`, por lo que un XSS podría exfiltrarlos. La API es Bearer (no cookies), así que el CSRF clásico no aplica; para máxima defensa se podría migrar a cookies `HttpOnly` + CSRF token.

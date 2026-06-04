@@ -35,6 +35,8 @@ class UserAccount(models.Model):
         help_text="Stripe customer ID (cus_xxx).",
     )
     is_email_verified = models.BooleanField(default=False)
+    # Bumped on password change / logout to invalidate all previously-issued JWTs.
+    token_version = models.IntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

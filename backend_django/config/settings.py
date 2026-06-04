@@ -1,14 +1,19 @@
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 import os
+import secrets
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 
-SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "change-me")
-DEBUG = os.getenv("DJANGO_DEBUG", "true").lower() == "true"
-_allowed_hosts_raw = os.getenv("DJANGO_ALLOWED_HOSTS", "*")
+# Never fall back to a publicly-known signing key. If DJANGO_SECRET_KEY is unset we use a
+# per-process random key (forces it to be configured in production; never the old "change-me").
+SECRET_KEY = os.getenv("DJANGO_SECRET_KEY") or secrets.token_urlsafe(50)
+# Default to production-safe (DEBUG off). Set DJANGO_DEBUG=true only in local development.
+DEBUG = os.getenv("DJANGO_DEBUG", "false").lower() == "true"
+# Never default to a wildcard host outside DEBUG — configure DJANGO_ALLOWED_HOSTS in production.
+_allowed_hosts_raw = os.getenv("DJANGO_ALLOWED_HOSTS", "*" if DEBUG else "localhost,127.0.0.1")
 ALLOWED_HOSTS = [host.strip() for host in _allowed_hosts_raw.split(",") if host.strip()]
 
 # Railway health checks can use internal hostnames that differ from public domains.
@@ -152,6 +157,8 @@ REST_FRAMEWORK = {
         "github_repo_create": "10/minute",
         "github_repo_contents": "60/minute",
         "resend_verification": "3/hour",
+        # Slows mass user/email enumeration via the member-picker search.
+        "user_search": "20/minute",
         # Resource creation limits
         "sprint_create": "20/hour",
         "milestone_create": "20/hour",
@@ -206,6 +213,9 @@ GITHUB_APP_WEBHOOK_TARGET_URL = os.getenv("GITHUB_APP_WEBHOOK_TARGET_URL", "")
 GITHUB_APP_STATE_SECRET = os.getenv("GITHUB_APP_STATE_SECRET", JWT_SECRET_KEY)
 FASTAPI_CHAT_BASE_URL = os.getenv("FASTAPI_CHAT_BASE_URL", "https://fast.yemoda.site")
 CORS_ALLOW_ALL_ORIGINS = os.getenv("CORS_ALLOW_ALL_ORIGINS", "false").lower() == "true"
+# Auth is bearer-token (Authorization header), not cookies — never allow credentialed CORS
+# (a wildcard origin combined with credentials would be a serious cross-origin exposure).
+CORS_ALLOW_CREDENTIALS = False
 
 # Stripe
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")

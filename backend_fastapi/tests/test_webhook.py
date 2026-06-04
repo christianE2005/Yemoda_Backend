@@ -77,30 +77,33 @@ class TestWebhookSignature:
                 )
         assert resp.status_code == status.HTTP_200_OK
 
-    def test_no_secret_configured_accepts_any_request(self, client):
+    def test_no_secret_configured_rejects_requests(self, client):
+        # Fail closed: with no configured secret the webhook must reject (not accept) requests.
         payload = json.dumps(PUSH_PAYLOAD).encode()
-        with patch("app.routers.webhook._WEBHOOK_SECRET", ""):
-            with patch("app.routers.webhook._process_push"):
-                resp = client.post(
-                    "/webhook/push/",
-                    content=payload,
-                    headers={
-                        "x-hub-signature-256": "",
-                        "x-github-event": "push",
-                        "content-type": "application/json",
-                    },
-                )
-        assert resp.status_code == status.HTTP_200_OK
-
-
-class TestWebhookEventType:
-    def test_non_push_event_is_ignored(self, client):
-        payload = json.dumps({}).encode()
         with patch("app.routers.webhook._WEBHOOK_SECRET", ""):
             resp = client.post(
                 "/webhook/push/",
                 content=payload,
                 headers={
+                    "x-hub-signature-256": "",
+                    "x-github-event": "push",
+                    "content-type": "application/json",
+                },
+            )
+        assert resp.status_code == status.HTTP_401_UNAUTHORIZED
+
+
+class TestWebhookEventType:
+    def test_non_push_event_is_ignored(self, client):
+        secret = "testsecret"
+        payload = json.dumps({}).encode()
+        sig = _make_signature(payload, secret)
+        with patch("app.routers.webhook._WEBHOOK_SECRET", secret):
+            resp = client.post(
+                "/webhook/push/",
+                content=payload,
+                headers={
+                    "x-hub-signature-256": sig,
                     "x-github-event": "ping",
                     "content-type": "application/json",
                 },
@@ -109,13 +112,16 @@ class TestWebhookEventType:
         assert "ignorado" in resp.json()["detail"]
 
     def test_push_event_dispatches_background_task(self, client):
+        secret = "testsecret"
         payload = json.dumps(PUSH_PAYLOAD).encode()
-        with patch("app.routers.webhook._WEBHOOK_SECRET", ""):
+        sig = _make_signature(payload, secret)
+        with patch("app.routers.webhook._WEBHOOK_SECRET", secret):
             with patch("app.routers.webhook._process_push") as mock_task:
                 resp = client.post(
                     "/webhook/push/",
                     content=payload,
                     headers={
+                        "x-hub-signature-256": sig,
                         "x-github-event": "push",
                         "content-type": "application/json",
                     },
@@ -129,11 +135,15 @@ class TestWebhookEventType:
 
 class TestWebhookPayload:
     def test_invalid_json_returns_400(self, client):
-        with patch("app.routers.webhook._WEBHOOK_SECRET", ""):
+        secret = "testsecret"
+        body = b"not-valid-json"
+        sig = _make_signature(body, secret)
+        with patch("app.routers.webhook._WEBHOOK_SECRET", secret):
             resp = client.post(
                 "/webhook/push/",
-                content=b"not-valid-json",
+                content=body,
                 headers={
+                    "x-hub-signature-256": sig,
                     "x-github-event": "push",
                     "content-type": "application/json",
                 },
@@ -141,13 +151,16 @@ class TestWebhookPayload:
         assert resp.status_code == status.HTTP_400_BAD_REQUEST
 
     def test_response_contains_repo_and_ref(self, client):
+        secret = "testsecret"
         payload = json.dumps(PUSH_PAYLOAD).encode()
-        with patch("app.routers.webhook._WEBHOOK_SECRET", ""):
+        sig = _make_signature(payload, secret)
+        with patch("app.routers.webhook._WEBHOOK_SECRET", secret):
             with patch("app.routers.webhook._process_push"):
                 resp = client.post(
                     "/webhook/push/",
                     content=payload,
                     headers={
+                        "x-hub-signature-256": sig,
                         "x-github-event": "push",
                         "content-type": "application/json",
                     },

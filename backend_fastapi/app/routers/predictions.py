@@ -1,6 +1,8 @@
+import hmac
 import logging
+import os
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from pydantic import BaseModel
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -11,7 +13,18 @@ from app.services import ml_service
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/predictions", tags=["predictions"])
+# These endpoints are server-to-server only (not called from the browser). Require the same
+# shared internal token used for /webhook/review-task/ so the directly-exposed FastAPI host
+# can't be hit anonymously (paid model abuse, cross-project metric disclosure, training DoS).
+_INTERNAL_TOKEN = os.getenv("GITHUB_APP_WEBHOOK_SECRET", "")
+
+
+def require_internal_token(x_internal_token: str = Header(default="")) -> None:
+    if not _INTERNAL_TOKEN or not hmac.compare_digest(x_internal_token, _INTERNAL_TOKEN):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="No autorizado.")
+
+
+router = APIRouter(prefix="/predictions", tags=["predictions"], dependencies=[Depends(require_internal_token)])
 limiter = Limiter(key_func=get_remote_address)
 
 

@@ -21,7 +21,7 @@ from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError, PermissionDenied
 from rest_framework.permissions import AllowAny, IsAuthenticated, IsAdminUser
-from .authentication import IsAdminUser
+from .authentication import EMAIL_VERIFICATION_GRACE_DAYS, IsAdminUser
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
@@ -87,6 +87,7 @@ from .serializers import (
     UserAccountSerializer,
 )
 from .permissions import (
+    assert_can_assign_role,
     can_move_task_to_column,
     has_project_perm,
     is_project_admin,
@@ -109,11 +110,13 @@ _GITHUB_OAUTH_TOKEN_URL = "https://github.com/login/oauth/access_token"
 
 def _issue_tokens(user: UserAccount) -> dict:
     access_expires_at = datetime.now(timezone.utc) + timedelta(minutes=settings.JWT_EXPIRE_MINUTES)
+    token_version = getattr(user, "token_version", 0) or 0
     access_payload = {
         "sub": str(user.id_user),
         "email": user.email,
         "is_admin": user.is_admin,
         "type": "access",
+        "tv": token_version,
         "exp": access_expires_at,
     }
     refresh_expires_at = datetime.now(timezone.utc) + timedelta(minutes=settings.JWT_REFRESH_EXPIRE_MINUTES)
@@ -121,6 +124,7 @@ def _issue_tokens(user: UserAccount) -> dict:
         "sub": str(user.id_user),
         "email": user.email,
         "type": "refresh",
+        "tv": token_version,
         "exp": refresh_expires_at,
     }
     access_token = jwt.encode(access_payload, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
@@ -393,6 +397,13 @@ class UserAccountViewSet(viewsets.ModelViewSet):
     queryset = UserAccount.objects.select_related('github_connection').all()
     serializer_class = UserAccountSerializer
 
+    def get_throttles(self):
+        # Rate-limit the open user/email search to slow enumeration of the user base.
+        if self.action == 'list' and self.request.query_params.get('search'):
+            self.throttle_scope = 'user_search'
+            return [ScopedRateThrottle()]
+        return super().get_throttles()
+
     def get_queryset(self):
         user = self.request.user
         search = self.request.query_params.get('search', '').strip()
@@ -451,12 +462,14 @@ class ProjectViewSet(viewsets.ModelViewSet):
         ).distinct()
 
     def create(self, request, *args, **kwargs):
-        import traceback
+        import logging
         try:
             return super().create(request, *args, **kwargs)
-        except Exception as e:
+        except Exception:
+            # Do not leak internals (stack trace / settings) to the client.
+            logging.getLogger(__name__).exception("Project creation failed")
             return Response(
-                {"error": str(e), "detail": traceback.format_exc()},
+                {"detail": "No se pudo crear el proyecto."},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
@@ -499,8 +512,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
 class RoleViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = Role.objects.all()
     serializer_class = RoleSerializer
-    authentication_classes = []
-    permission_classes = [AllowAny]
+    # Requires authentication (inherits the global IsAuthenticated default) — no longer public.
 
 
 class ProjectRoleViewSet(viewsets.ModelViewSet):
@@ -550,6 +562,7 @@ class ProjectMemberViewSet(viewsets.ModelViewSet):
         user = serializer.validated_data.get('user')
         if project:
             require_perm(self.request.user, project, "can_manage_members")
+            assert_can_assign_role(self.request.user, project, serializer.validated_data.get('project_role'))
         if project and user and project.created_by_id == user.pk:
             raise ValidationError("El creador del proyecto ya es miembro por defecto.")
         member = serializer.save()
@@ -585,8 +598,12 @@ class ProjectMemberViewSet(viewsets.ModelViewSet):
         return qs.distinct()
 
     def perform_update(self, serializer):
-        # Assigning/changing a member's project_role requires can_manage_members.
-        require_perm(self.request.user, serializer.instance.project, "can_manage_members")
+        # Assigning/changing a member's project_role requires can_manage_members, and only a
+        # project admin may grant the full-access (admin) role.
+        project = serializer.instance.project
+        require_perm(self.request.user, project, "can_manage_members")
+        new_role = serializer.validated_data.get('project_role', serializer.instance.project_role)
+        assert_can_assign_role(self.request.user, project, new_role)
         serializer.save()
 
     def perform_destroy(self, instance):
@@ -644,6 +661,9 @@ class ProjectMembersView(APIView):
             project_role = ProjectRole.objects.filter(pk=project_role_id, project=project).first()
             if not project_role:
                 return Response({"detail": "Rol de proyecto no encontrado."}, status=status.HTTP_404_NOT_FOUND)
+
+        # Only a project admin may grant the full-access (admin) role.
+        assert_can_assign_role(request.user, project, project_role)
 
         member = ProjectMember.objects.create(project=project, user=user, role=role, project_role=project_role)
 
@@ -1224,7 +1244,8 @@ class TaskAssignmentViewSet(viewsets.ModelViewSet):
         instance.delete()
 
 
-class ActivityLogViewSet(viewsets.ModelViewSet):
+class ActivityLogViewSet(viewsets.ReadOnlyModelViewSet):
+    # Read-only: activity logs are written server-side, never created/edited via the API.
     serializer_class = ActivityLogSerializer
     queryset = ActivityLog.objects.none()  # needed for router basename resolution
 
@@ -1315,7 +1336,7 @@ class LoginView(APIView):
             return Response({"detail": "Credenciales invalidas."}, status=status.HTTP_401_UNAUTHORIZED)
 
         if not user.is_email_verified:
-            grace_expires = user.created_at + timedelta(days=7)
+            grace_expires = user.created_at + timedelta(days=EMAIL_VERIFICATION_GRACE_DAYS)
             if datetime.now(timezone.utc) > grace_expires:
                 return Response(
                     {
@@ -1364,6 +1385,10 @@ class RefreshView(APIView):
         if not user:
             return Response({"detail": "Usuario no encontrado."}, status=status.HTTP_401_UNAUTHORIZED)
 
+        # Reject refresh tokens minted before the current token version (revoked sessions).
+        if payload.get("tv", 0) != (getattr(user, "token_version", 0) or 0):
+            return Response({"detail": "Sesión revocada. Inicia sesión de nuevo."}, status=status.HTTP_401_UNAUTHORIZED)
+
         tokens = _issue_tokens(user)
         return Response(
             {
@@ -1394,9 +1419,16 @@ class ChangePasswordView(APIView):
         if not check_password(current_password, request.user.password_hash):
             return Response({"detail": "Contraseña actual incorrecta."}, status=status.HTTP_400_BAD_REQUEST)
 
+        # Rotate the token version so every previously-issued JWT (access + refresh) is
+        # invalidated, then hand back fresh tokens so the current client stays logged in.
         request.user.password_hash = make_password(new_password)
-        request.user.save(update_fields=["password_hash"])
-        return Response({"detail": "Contraseña actualizada correctamente."}, status=status.HTTP_200_OK)
+        request.user.token_version = (getattr(request.user, "token_version", 0) or 0) + 1
+        request.user.save(update_fields=["password_hash", "token_version"])
+        tokens = _issue_tokens(request.user)
+        return Response(
+            {"detail": "Contraseña actualizada correctamente.", **tokens},
+            status=status.HTTP_200_OK,
+        )
 
 
 class VerifyEmailView(APIView):
@@ -1665,9 +1697,11 @@ class GoogleOauthCallbackView(APIView):
             user.save(update_fields=["is_email_verified"])
 
         tokens = _issue_tokens(user)
+        # Deliver tokens in the URL fragment (#), not the query string: fragments are not sent
+        # to servers, so they don't leak via the Referer header or proxy/server access logs.
         redirect_url = (
             f"{frontend_redirect}"
-            f"?access_token={tokens['access_token']}"
+            f"#access_token={tokens['access_token']}"
             f"&refresh_token={tokens['refresh_token']}"
             f"&expires_at={tokens['expires_at']}"
             f"&needs_nickname={'1' if needs_nickname else '0'}"
@@ -1888,9 +1922,11 @@ class GithubAppOauthCallbackView(APIView):
             except (ValueError, TypeError):
                 pass
 
+        # Tokens go in the URL fragment (#), not the query string — fragments aren't sent to
+        # servers, avoiding Referer / access-log leakage of the bearer + refresh tokens.
         redirect_url = (
             f"{frontend_redirect}"
-            f"?access_token={payload['access_token']}"
+            f"#access_token={payload['access_token']}"
             f"&refresh_token={payload['refresh_token']}"
             f"&expires_at={payload['expires_at']}"
         )
@@ -1914,12 +1950,11 @@ class GithubAppLinkInstallationView(APIView):
     def post(self, request):
         serializer = GithubAppLinkInstallationSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        user_id = serializer.validated_data["user_id"]
         installation_id = serializer.validated_data["installation_id"]
 
-        user = UserAccount.objects.filter(id_user=user_id).first()
-        if not user:
-            return Response({"detail": "Usuario no encontrado."}, status=status.HTTP_404_NOT_FOUND)
+        # Always link the installation to the authenticated caller — never a body-supplied
+        # user_id (which would let an attacker hijack installations onto other accounts).
+        user = request.user
 
         try:
             installation_response = requests.get(
@@ -1932,7 +1967,7 @@ class GithubAppLinkInstallationView(APIView):
 
         if installation_response.status_code >= 400:
             return Response(
-                {"detail": "No se pudo consultar la instalacion.", "github_response": installation_response.text},
+                {"detail": "No se pudo consultar la instalacion."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -1993,9 +2028,9 @@ class GithubCreateRepoView(APIView):
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
 
-        user = UserAccount.objects.filter(id_user=data["user_id"]).first()
-        if not user:
-            return Response({"detail": "Usuario no encontrado."}, status=status.HTTP_404_NOT_FOUND)
+        # Act only as the authenticated caller — never a body-supplied user_id (which would
+        # let an attacker create repos with another user's GitHub token / org installation).
+        user = request.user
 
         owner_type = data["owner_type"]
         owner = data.get("owner") or ""
@@ -2055,12 +2090,14 @@ class GithubCreateRepoView(APIView):
         }
         repo_response = requests.post(create_url, headers=auth_headers, json=create_repo_payload, timeout=20)
         if repo_response.status_code >= 400:
+            # Surface GitHub's user-facing `message` only (e.g. "name already exists"),
+            # never the raw response body.
             try:
-                gh_error = repo_response.json().get("message", repo_response.text)
+                gh_error = repo_response.json().get("message", "")
             except Exception:
-                gh_error = repo_response.text
+                gh_error = ""
             return Response(
-                {"detail": f"GitHub: {gh_error}"},
+                {"detail": f"GitHub: {gh_error}" if gh_error else "No se pudo crear el repositorio en GitHub."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -2138,11 +2175,13 @@ class GithubCreateRepoView(APIView):
                         creator_token,
                     )
 
-        webhook_url = data.get("webhook_url") or settings.GITHUB_APP_WEBHOOK_TARGET_URL
+        # Always use the server-configured webhook target — never a client-supplied URL
+        # (which would let an attacker register the repo's webhook against an arbitrary host).
+        webhook_url = settings.GITHUB_APP_WEBHOOK_TARGET_URL
         if not webhook_url:
             return Response(
                 {
-                    "detail": "Repositorio creado, pero falta webhook_url. Configura GITHUB_APP_WEBHOOK_TARGET_URL o envia webhook_url.",
+                    "detail": "Repositorio creado, pero falta configurar GITHUB_APP_WEBHOOK_TARGET_URL en el servidor.",
                     "repository": repo,
                 },
                 status=status.HTTP_201_CREATED,
@@ -2170,7 +2209,6 @@ class GithubCreateRepoView(APIView):
                 {
                     "detail": "Repositorio creado, pero fallo la creacion del webhook.",
                     "repository": repo,
-                    "github_response": hooks_response.text,
                 },
                 status=status.HTTP_201_CREATED,
             )
@@ -2206,14 +2244,21 @@ class GithubPushWebhookView(APIView):
         payload_bytes = request.body
         signature = request.headers.get("X-Hub-Signature-256", "")
 
-        if settings.GITHUB_APP_WEBHOOK_SECRET:
-            expected = "sha256=" + hmac.new(
-                settings.GITHUB_APP_WEBHOOK_SECRET.encode("utf-8"),
-                payload_bytes,
-                hashlib.sha256,
-            ).hexdigest()
-            if not hmac.compare_digest(signature, expected):
-                return Response({"detail": "Firma de webhook invalida."}, status=status.HTTP_401_UNAUTHORIZED)
+        # Fail closed: a missing secret means we cannot authenticate the webhook, so reject
+        # rather than accept unsigned requests that mutate data / trigger AI processing.
+        webhook_secret = settings.GITHUB_APP_WEBHOOK_SECRET
+        if not webhook_secret:
+            return Response(
+                {"detail": "Webhook no disponible: GITHUB_APP_WEBHOOK_SECRET no está configurado."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        expected = "sha256=" + hmac.new(
+            webhook_secret.encode("utf-8"),
+            payload_bytes,
+            hashlib.sha256,
+        ).hexdigest()
+        if not hmac.compare_digest(signature, expected):
+            return Response({"detail": "Firma de webhook invalida."}, status=status.HTTP_401_UNAUTHORIZED)
 
         event = request.headers.get("X-GitHub-Event", "")
         try:
@@ -2341,6 +2386,23 @@ class GithubPushListView(APIView):
         return Response(serializer.data)
 
 
+def _user_can_access_repo(user, repo_full_name: str) -> bool:
+    """True only if the user is a member/creator of a project linked to repo_full_name.
+
+    Used to gate repo-scoped GitHub endpoints so an authenticated user can't mint an org
+    installation token for, and read/write, repositories they have no project relationship to.
+    """
+    if not repo_full_name:
+        return False
+    project_ids = Project.objects.filter(
+        Q(members__user=user) | Q(created_by=user)
+    ).values_list("id_project", flat=True)
+    return (
+        ProjectRepo.objects.filter(project_id__in=project_ids, repo_full_name__iexact=repo_full_name).exists()
+        or Project.objects.filter(id_project__in=project_ids, github_repo_full_name__iexact=repo_full_name).exists()
+    )
+
+
 class GithubCommitDiffView(APIView):
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "github_repo_contents"
@@ -2360,6 +2422,9 @@ class GithubCommitDiffView(APIView):
                 {"detail": "Se requieren los parámetros 'repo' y 'commit'."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+
+        if not _user_can_access_repo(request.user, repo):
+            return Response({"detail": "No tienes acceso a este repositorio."}, status=status.HTTP_403_FORBIDDEN)
 
         # Find installation for this repo's org
         org_login = repo.split("/")[0] if "/" in repo else repo
@@ -2390,7 +2455,7 @@ class GithubCommitDiffView(APIView):
 
         if diff_response.status_code >= 400:
             return Response(
-                {"detail": "No se pudo obtener el diff.", "github_response": diff_response.text},
+                {"detail": "No se pudo obtener el diff."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -2452,6 +2517,9 @@ class GithubRepoContentsView(APIView):
         if not repo:
             return Response({"detail": "El parámetro 'repo' es requerido."}, status=status.HTTP_400_BAD_REQUEST)
 
+        if not _user_can_access_repo(request.user, repo):
+            return Response({"detail": "No tienes acceso a este repositorio."}, status=status.HTTP_403_FORBIDDEN)
+
         org_login = repo.split("/")[0] if "/" in repo else repo
         installation = GithubAppInstallation.objects.filter(account_login__iexact=org_login).first()
 
@@ -2489,7 +2557,7 @@ class GithubRepoContentsView(APIView):
         if response.status_code == 404:
             return Response({"detail": "Ruta no encontrada en el repositorio."}, status=status.HTTP_404_NOT_FOUND)
         if response.status_code >= 400:
-            return Response({"detail": "Error al obtener contenidos.", "github_response": response.text}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"detail": "Error al obtener contenidos."}, status=status.HTTP_400_BAD_REQUEST)
 
         data = response.json()
 
@@ -2674,9 +2742,17 @@ class TaskHistoryView(APIView):
         ),
     )
     def get(self, request, task_id: int):
-        task = Task.objects.filter(pk=task_id).first()
+        task = Task.objects.select_related("project").filter(pk=task_id).first()
         if not task:
             return Response({"detail": "Task not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        # Only members/creator of the task's project may read its push history (diffs/snippets).
+        is_member = (
+            task.project.created_by_id == getattr(request.user, "id_user", None)
+            or ProjectMember.objects.filter(project=task.project, user=request.user).exists()
+        )
+        if not is_member:
+            return Response({"detail": "No tienes acceso a esta tarea."}, status=status.HTTP_403_FORBIDDEN)
 
         matches = (
             TaskPushMatch.objects.select_related("push")
@@ -3055,7 +3131,7 @@ class PullRequestReviewView(APIView):
             return Response({"detail": "PR no encontrado."}, status=status.HTTP_404_NOT_FOUND)
         if resp.status_code >= 400:
             return Response(
-                {"detail": "Error enviando el review a GitHub.", "github_response": resp.text},
+                {"detail": "Error enviando el review a GitHub."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -3116,7 +3192,7 @@ class PullRequestCommentView(APIView):
             return Response({"detail": "PR no encontrado."}, status=status.HTTP_404_NOT_FOUND)
         if resp.status_code >= 400:
             return Response(
-                {"detail": "Error publicando el comentario en GitHub.", "github_response": resp.text},
+                {"detail": "Error publicando el comentario en GitHub."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -3297,7 +3373,7 @@ class TaskCreateBranchView(APIView):
             )
         if ref_resp.status_code >= 400:
             return Response(
-                {"detail": "Error consultando la rama base en GitHub.", "github_response": ref_resp.text},
+                {"detail": "Error consultando la rama base en GitHub."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -3321,7 +3397,7 @@ class TaskCreateBranchView(APIView):
             )
         if create_resp.status_code >= 400:
             return Response(
-                {"detail": "Error creando la rama en GitHub.", "github_response": create_resp.text},
+                {"detail": "Error creando la rama en GitHub."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -3458,6 +3534,15 @@ class StripeWebhookView(APIView):
             payment.save()
 
             user = payment.user
+            # Audit only: the user↔plan binding comes from the server-created session, so a
+            # mismatching paying email is not a grant decision — but log it for traceability.
+            paid_email = (session_data.get("customer_details") or {}).get("email") or session_data.get("customer_email")
+            if paid_email and user.email and paid_email.strip().lower() != user.email.strip().lower():
+                import logging
+                logging.getLogger(__name__).warning(
+                    "Stripe checkout %s: paying email differs from account email (user_id=%s).",
+                    session_id, user.id_user,
+                )
             user.is_premium = True
             # Guardar IDs de Stripe en el usuario para poder cancelar/gestionar después
             stripe_customer_id = session_data.get("customer")
@@ -3570,7 +3655,7 @@ class GithubRepoBranchesView(APIView):
         url = f"{GITHUB_API_URL}/repos/{repo}/branches"
         resp = requests.get(url, headers=_github_headers(token), params={"per_page": 100}, timeout=20)
         if resp.status_code >= 400:
-            return Response({"detail": "Error al obtener branches.", "github_response": resp.text}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"detail": "Error al obtener branches."}, status=status.HTTP_400_BAD_REQUEST)
 
         branches = [{"name": b["name"], "sha": b["commit"]["sha"]} for b in resp.json()]
         return Response({"branches": branches})
@@ -3578,6 +3663,8 @@ class GithubRepoBranchesView(APIView):
     @staticmethod
     def _resolve_token(request, repo: str) -> str | Response:
         """Try installation token first, fall back to user OAuth token."""
+        if not _user_can_access_repo(request.user, repo):
+            return Response({"detail": "No tienes acceso a este repositorio."}, status=status.HTTP_403_FORBIDDEN)
         org_login = repo.split("/")[0] if "/" in repo else repo
         installation = GithubAppInstallation.objects.filter(account_login__iexact=org_login).first()
         if installation:
@@ -3659,7 +3746,7 @@ class GithubCommitFilesView(APIView):
         if ref_resp.status_code == 404:
             return Response({"detail": f"Branch '{branch}' no encontrado."}, status=status.HTTP_400_BAD_REQUEST)
         if ref_resp.status_code >= 400:
-            return Response({"detail": "Error al obtener ref.", "github_response": ref_resp.text}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"detail": "Error al obtener ref."}, status=status.HTTP_400_BAD_REQUEST)
 
         latest_commit_sha = ref_resp.json()["object"]["sha"]
 
@@ -3669,7 +3756,7 @@ class GithubCommitFilesView(APIView):
             headers=headers, timeout=20,
         )
         if commit_resp.status_code >= 400:
-            return Response({"detail": "Error al obtener commit base.", "github_response": commit_resp.text}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"detail": "Error al obtener commit base."}, status=status.HTTP_400_BAD_REQUEST)
 
         base_tree_sha = commit_resp.json()["tree"]["sha"]
 
@@ -3697,7 +3784,7 @@ class GithubCommitFilesView(APIView):
                 timeout=20,
             )
             if blob_resp.status_code >= 400:
-                return Response({"detail": f"Error creando blob para '{path}'.", "github_response": blob_resp.text}, status=status.HTTP_400_BAD_REQUEST)
+                return Response({"detail": f"Error creando blob para '{path}'."}, status=status.HTTP_400_BAD_REQUEST)
 
             blob_sha = blob_resp.json()["sha"]
             tree_entries.append({"path": path, "mode": "100644", "type": "blob", "sha": blob_sha})
@@ -3710,7 +3797,7 @@ class GithubCommitFilesView(APIView):
             timeout=20,
         )
         if new_tree_resp.status_code >= 400:
-            return Response({"detail": "Error creando árbol.", "github_response": new_tree_resp.text}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"detail": "Error creando árbol."}, status=status.HTTP_400_BAD_REQUEST)
 
         new_tree_sha = new_tree_resp.json()["sha"]
 
@@ -3722,7 +3809,7 @@ class GithubCommitFilesView(APIView):
             timeout=20,
         )
         if new_commit_resp.status_code >= 400:
-            return Response({"detail": "Error creando commit.", "github_response": new_commit_resp.text}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"detail": "Error creando commit."}, status=status.HTTP_400_BAD_REQUEST)
 
         new_commit_sha = new_commit_resp.json()["sha"]
         commit_url = new_commit_resp.json().get("html_url") or f"https://github.com/{repo}/commit/{new_commit_sha}"
@@ -3735,7 +3822,7 @@ class GithubCommitFilesView(APIView):
             timeout=20,
         )
         if update_ref_resp.status_code >= 400:
-            return Response({"detail": "Error actualizando referencia.", "github_response": update_ref_resp.text}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"detail": "Error actualizando referencia."}, status=status.HTTP_400_BAD_REQUEST)
 
         return Response(
             {
@@ -3807,26 +3894,21 @@ class GithubAppDebugView(APIView):
     permission_classes = [IsAdminUser]
 
     def get(self, request):
-        import traceback
         pk = settings.GITHUB_APP_PRIVATE_KEY or ""
-        lines = pk.splitlines()
+        # Only expose booleans about whether the App is configured — never key material,
+        # line contents, or stack traces (admin-only, but still no secret fragments).
         result = {
-            "github_app_id": settings.GITHUB_APP_ID or "(not set)",
-            "private_key_length": len(pk),
-            "private_key_line_count": len(lines),
-            "private_key_first_line": lines[0] if lines else "(empty)",
-            "private_key_last_line": lines[-1] if lines else "(empty)",
+            "github_app_id_configured": bool(settings.GITHUB_APP_ID),
+            "private_key_configured": bool(pk),
             "has_begin_header": "-----BEGIN RSA PRIVATE KEY-----" in pk or "-----BEGIN PRIVATE KEY-----" in pk,
             "has_end_footer": "-----END RSA PRIVATE KEY-----" in pk or "-----END PRIVATE KEY-----" in pk,
             "jwt_ok": False,
-            "jwt_error": None,
         }
         try:
             _github_app_jwt()
             result["jwt_ok"] = True
-        except Exception as exc:
-            result["jwt_error"] = str(exc)
-            result["traceback"] = traceback.format_exc()
+        except Exception:
+            result["jwt_ok"] = False
         return Response(result)
 
 

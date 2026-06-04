@@ -69,8 +69,9 @@ def _extract_changed_paths(commits: list[dict]) -> list[str]:
 
 
 def _verify_signature(payload: bytes, signature: str) -> bool:
+    # Fail closed: with no configured secret we cannot authenticate the webhook, so reject.
     if not _WEBHOOK_SECRET:
-        return True
+        return False
     expected = "sha256=" + hmac.new(
         _WEBHOOK_SECRET.encode("utf-8"), payload, hashlib.sha256
     ).hexdigest()
@@ -400,10 +401,11 @@ async def github_push_webhook(
     """
     payload_bytes = await request.body()
 
-    if _WEBHOOK_SECRET and not _verify_signature(payload_bytes, x_hub_signature_256):
+    # Fail closed: reject if the signature is invalid OR the secret is not configured.
+    if not _verify_signature(payload_bytes, x_hub_signature_256):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Firma de webhook inválida.",
+            detail="Firma de webhook inválida o secret no configurado.",
         )
 
     if x_github_event != "push":
@@ -435,7 +437,8 @@ async def review_task_webhook(
     Called server-to-server by the Django API (not by GitHub). Analyzes the parent
     against the project's latest stored push diff and applies the result.
     """
-    if _WEBHOOK_SECRET and not hmac.compare_digest(x_internal_token, _WEBHOOK_SECRET):
+    # Fail closed: require a configured secret AND a matching internal token.
+    if not _WEBHOOK_SECRET or not hmac.compare_digest(x_internal_token, _WEBHOOK_SECRET):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token interno inválido.")
 
     try:

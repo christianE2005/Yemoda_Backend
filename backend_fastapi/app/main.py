@@ -52,34 +52,3 @@ def on_startup() -> None:
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
-
-
-@app.get("/debug/")
-def debug() -> dict:
-    import os, time
-    import jwt as pyjwt
-    from app.services.github_service import _GITHUB_APP_ID, _GITHUB_APP_PRIVATE_KEY
-
-    anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
-    pk = _GITHUB_APP_PRIVATE_KEY
-    pk_lines = pk.splitlines()
-    jwt_ok = False
-    jwt_error = None
-    try:
-        now = int(time.time())
-        pyjwt.encode({"iat": now - 60, "exp": now + 600, "iss": _GITHUB_APP_ID}, pk, algorithm="RS256")
-        jwt_ok = True
-    except Exception as exc:
-        jwt_error = str(exc)
-
-    return {
-        "anthropic_api_key_set": bool(anthropic_key),
-        "github_app_id": _GITHUB_APP_ID or "(not set)",
-        "private_key_line_count": len(pk_lines),
-        "private_key_first_line": pk_lines[0] if pk_lines else "(empty)",
-        "private_key_last_line": pk_lines[-1] if pk_lines else "(empty)",
-        "has_begin_header": "BEGIN" in pk,
-        "has_end_footer": "END" in pk,
-        "jwt_ok": jwt_ok,
-        "jwt_error": jwt_error,
-    }

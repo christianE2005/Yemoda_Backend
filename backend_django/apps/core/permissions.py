@@ -82,6 +82,17 @@ def require_perm(user, project, perm: str) -> None:
         raise PermissionDenied("Your project role does not allow this action.")
 
 
+def assert_can_assign_role(user, project, role) -> None:
+    """The full-access (admin) role can only be granted by a project admin (creator/system admin).
+
+    Without this, anyone holding `can_manage_members` could elevate themselves or others to
+    full project admin — a privilege escalation. `can_manage_members` is itself grantable to
+    non-admins, so the admin role must be gated separately.
+    """
+    if role is not None and getattr(role, "is_admin_role", False) and not is_project_admin(user, project):
+        raise PermissionDenied("Solo el administrador del proyecto puede asignar el rol de Admin.")
+
+
 def resolve_capabilities(user, project) -> dict:
     """
     Flatten the effective capabilities for the current user in the project, for the
