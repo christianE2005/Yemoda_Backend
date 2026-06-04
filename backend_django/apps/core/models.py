@@ -118,6 +118,75 @@ class Role(models.Model):
         db_table = "project_role"
 
 
+class ProjectRole(models.Model):
+    """Per-project, creator-managed role with granular permissions.
+
+    Each project owns its own set of roles (seeded with defaults on creation) that the
+    project creator can edit. Permissions are individual booleans; `max_move_column`
+    optionally caps how far a role can move a task on the board (null = no limit).
+    """
+
+    id_project_role = models.BigAutoField(primary_key=True)
+    project = models.ForeignKey(
+        Project,
+        on_delete=models.CASCADE,
+        db_column="id_project",
+        related_name="project_roles",
+    )
+    name = models.CharField(max_length=50)
+    description = models.TextField(null=True, blank=True)
+    # Full-access role (the creator's default). Cannot be deleted; all perms implicitly on.
+    is_admin_role = models.BooleanField(default=False)
+    # Seeded default role (editable). Kept to identify the out-of-the-box set.
+    is_system = models.BooleanField(default=False)
+
+    # ── Granular permissions ────────────────────────────────────────────────
+    can_create_tasks = models.BooleanField(default=False)
+    can_edit_tasks = models.BooleanField(default=False)
+    can_delete_tasks = models.BooleanField(default=False)
+    can_move_tasks = models.BooleanField(default=False)
+    can_manage_sprints = models.BooleanField(default=False)
+    can_manage_board = models.BooleanField(default=False)
+    can_manage_milestones = models.BooleanField(default=False)
+    can_manage_tags = models.BooleanField(default=False)
+    can_comment = models.BooleanField(default=False)
+    can_manage_members = models.BooleanField(default=False)
+    can_manage_project = models.BooleanField(default=False)
+    can_trigger_ai = models.BooleanField(default=False)
+
+    # Cap on how far a task can be moved: a task may only be moved into columns whose
+    # `order` <= this column's `order`. Null = no limit (can move anywhere).
+    max_move_column = models.ForeignKey(
+        "BoardColumn",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        db_column="id_max_move_column",
+        related_name="role_move_caps",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "project_custom_role"
+        unique_together = ("project", "name")
+
+    # Permission attribute names exposed as checkboxes / enforced in the API.
+    PERMISSION_FIELDS = (
+        "can_create_tasks",
+        "can_edit_tasks",
+        "can_delete_tasks",
+        "can_move_tasks",
+        "can_manage_sprints",
+        "can_manage_board",
+        "can_manage_milestones",
+        "can_manage_tags",
+        "can_comment",
+        "can_manage_members",
+        "can_manage_project",
+        "can_trigger_ai",
+    )
+
+
 class ProjectMember(models.Model):
     id = models.BigAutoField(primary_key=True)
     user = models.ForeignKey(
@@ -139,6 +208,16 @@ class ProjectMember(models.Model):
         blank=True,
         db_column="id_role",
         related_name="project_members",
+    )
+    # Per-project custom role that actually drives authorization. The legacy `role` FK
+    # (global) is kept for backward compatibility but no longer used for enforcement.
+    project_role = models.ForeignKey(
+        ProjectRole,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        db_column="id_project_role",
+        related_name="members",
     )
     joined_at = models.DateTimeField(auto_now_add=True)
 

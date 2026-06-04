@@ -12,6 +12,7 @@ from .models import (
     Project,
     ProjectMember,
     ProjectRepo,
+    ProjectRole,
     Role,
     Sprint,
     Tag,
@@ -98,7 +99,27 @@ class RoleSerializer(serializers.ModelSerializer):
         fields = "__all__"
 
 
+class ProjectRoleSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ProjectRole
+        fields = "__all__"
+        read_only_fields = ("id_project_role", "is_admin_role", "is_system", "created_at")
+
+    def validate(self, attrs):
+        # max_move_column must belong to a board of the same project.
+        project = attrs.get("project") or (self.instance.project if self.instance else None)
+        column = attrs.get("max_move_column")
+        if column is not None and project is not None and column.board.project_id != project.id_project:
+            raise serializers.ValidationError(
+                {"max_move_column": "La columna debe pertenecer a un tablero de este proyecto."}
+            )
+        return attrs
+
+
 class ProjectMemberSerializer(serializers.ModelSerializer):
+    # Read-only details of the assigned per-project role, for display.
+    project_role_name = serializers.CharField(source="project_role.name", read_only=True, allow_null=True)
+
     class Meta:
         model = ProjectMember
         fields = "__all__"

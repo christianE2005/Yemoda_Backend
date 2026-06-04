@@ -38,6 +38,7 @@ from .models import (
     Project,
     ProjectMember,
     ProjectRepo,
+    ProjectRole,
     Role,
     Sprint,
     Tag,
@@ -67,6 +68,7 @@ from .serializers import (
     MilestoneSerializer,
     ProjectMemberSerializer,
     ProjectRepoSerializer,
+    ProjectRoleSerializer,
     ProjectSerializer,
     RefreshSerializer,
     RegisterSerializer,
@@ -83,6 +85,14 @@ from .serializers import (
     TaskAIReviewResultSerializer,
     TaskWarningSerializer,
     UserAccountSerializer,
+)
+from .permissions import (
+    can_move_task_to_column,
+    has_project_perm,
+    is_project_admin,
+    require_perm,
+    resolve_capabilities,
+    seed_default_project_roles,
 )
 
 GITHUB_API_URL = "https://api.github.com"
@@ -452,24 +462,38 @@ class ProjectViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         project = serializer.save(created_by=self.request.user, status=Project.PLANNING)
+        # Seed the default per-project roles (Admin/Editor/Contributor/Viewer).
         try:
+            seed_default_project_roles(project)
+        except Exception:
+            pass
+        try:
+            admin_role = ProjectRole.objects.filter(project=project, is_admin_role=True).first()
             ProjectMember.objects.get_or_create(
                 project=project,
                 user=self.request.user,
-                defaults={"role": None},
+                defaults={"role": None, "project_role": admin_role},
             )
         except Exception:
             pass
 
     def perform_update(self, serializer):
-        if serializer.instance.created_by != self.request.user:
-            raise PermissionDenied("Solo el creador puede modificar el proyecto.")
+        # Project creator/admin or a role with can_manage_project.
+        require_perm(self.request.user, serializer.instance, "can_manage_project")
         serializer.save()
 
     def perform_destroy(self, instance):
-        if instance.created_by != self.request.user:
+        # Deleting a whole project stays creator/admin-only.
+        if not is_project_admin(self.request.user, instance):
             raise PermissionDenied("Solo el creador puede eliminar el proyecto.")
         instance.delete()
+
+    @extend_schema(responses={200: dict}, tags=["projects"], summary="Capacidades del usuario actual en el proyecto")
+    @action(detail=True, methods=['get'], url_path='my-permissions')
+    def my_permissions(self, request, pk=None):
+        """Resolved capability flags for the current user in this project (UI gating)."""
+        project = self.get_object()  # get_queryset enforces membership
+        return Response(resolve_capabilities(request.user, project))
 
 
 class RoleViewSet(viewsets.ReadOnlyModelViewSet):
@@ -479,6 +503,44 @@ class RoleViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [AllowAny]
 
 
+class ProjectRoleViewSet(viewsets.ModelViewSet):
+    """Per-project custom roles. Read for members; create/edit/delete for project admins."""
+    queryset = ProjectRole.objects.all()
+    serializer_class = ProjectRoleSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        user_project_ids = Project.objects.filter(
+            Q(members__user=user) | Q(created_by=user)
+        ).values_list('id_project', flat=True)
+        qs = ProjectRole.objects.filter(project_id__in=user_project_ids)
+        project_id = self.request.query_params.get('project')
+        if project_id is not None:
+            qs = qs.filter(project_id=project_id)
+        return qs.select_related('max_move_column').order_by('id_project_role')
+
+    def _require_admin(self, project):
+        if not is_project_admin(self.request.user, project):
+            raise PermissionDenied("Solo el creador del proyecto puede gestionar los roles.")
+
+    def perform_create(self, serializer):
+        self._require_admin(serializer.validated_data.get('project'))
+        serializer.save()
+
+    def perform_update(self, serializer):
+        instance = serializer.instance
+        self._require_admin(instance.project)
+        if instance.is_admin_role:
+            raise PermissionDenied("El rol de administrador no se puede modificar.")
+        serializer.save()
+
+    def perform_destroy(self, instance):
+        self._require_admin(instance.project)
+        if instance.is_admin_role:
+            raise PermissionDenied("El rol de administrador no se puede eliminar.")
+        instance.delete()
+
+
 class ProjectMemberViewSet(viewsets.ModelViewSet):
     queryset = ProjectMember.objects.all()
     serializer_class = ProjectMemberSerializer
@@ -486,8 +548,8 @@ class ProjectMemberViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         project = serializer.validated_data.get('project')
         user = serializer.validated_data.get('user')
-        if project and project.created_by != self.request.user:
-            raise PermissionDenied("Solo el creador del proyecto puede agregar miembros.")
+        if project:
+            require_perm(self.request.user, project, "can_manage_members")
         if project and user and project.created_by_id == user.pk:
             raise ValidationError("El creador del proyecto ya es miembro por defecto.")
         member = serializer.save()
@@ -522,15 +584,20 @@ class ProjectMemberViewSet(viewsets.ModelViewSet):
 
         return qs.distinct()
 
+    def perform_update(self, serializer):
+        # Assigning/changing a member's project_role requires can_manage_members.
+        require_perm(self.request.user, serializer.instance.project, "can_manage_members")
+        serializer.save()
+
     def perform_destroy(self, instance):
         user = self.request.user
         project = instance.project
         # Prevent removing the project creator
         if instance.user == project.created_by:
             raise PermissionDenied("El creador del proyecto no puede ser removido.")
-        # Creator can remove anyone; members can only remove themselves (leave)
-        if project.created_by != user and instance.user != user:
-            raise PermissionDenied("Solo puedes salirte del proyecto, no eliminar a otros miembros.")
+        # Anyone can leave (remove themselves); removing others needs can_manage_members.
+        if instance.user != user and not has_project_perm(user, project, "can_manage_members"):
+            raise PermissionDenied("No tienes permiso para eliminar a otros miembros.")
         instance.delete()
 
 
@@ -549,8 +616,8 @@ class ProjectMembersView(APIView):
         if not project:
             return Response({"detail": "Proyecto no encontrado."}, status=status.HTTP_404_NOT_FOUND)
 
-        if project.created_by != request.user:
-            return Response({"detail": "Solo el creador del proyecto puede agregar miembros."}, status=status.HTTP_403_FORBIDDEN)
+        if not has_project_perm(request.user, project, "can_manage_members"):
+            return Response({"detail": "No tienes permiso para agregar miembros."}, status=status.HTTP_403_FORBIDDEN)
 
         user_id = request.data.get("user_id")
         if not user_id:
@@ -570,7 +637,15 @@ class ProjectMembersView(APIView):
             if not role:
                 return Response({"detail": "Rol no encontrado."}, status=status.HTTP_404_NOT_FOUND)
 
-        member = ProjectMember.objects.create(project=project, user=user, role=role)
+        # Per-project role assignment (the role system that drives authorization).
+        project_role_id = request.data.get("project_role_id")
+        project_role = None
+        if project_role_id:
+            project_role = ProjectRole.objects.filter(pk=project_role_id, project=project).first()
+            if not project_role:
+                return Response({"detail": "Rol de proyecto no encontrado."}, status=status.HTTP_404_NOT_FOUND)
+
+        member = ProjectMember.objects.create(project=project, user=user, role=role, project_role=project_role)
 
         # If the project has linked repos, add the new member as a collaborator on GitHub
         # Use the project creator's OAuth token (they have admin on the repos)
@@ -638,14 +713,18 @@ class BoardViewSet(viewsets.ModelViewSet):
             qs = qs.filter(project_id=project_id)
         return qs
 
+    def perform_create(self, serializer):
+        project = serializer.validated_data.get('project')
+        if project:
+            require_perm(self.request.user, project, "can_manage_board")
+        serializer.save()
+
     def perform_update(self, serializer):
-        if serializer.instance.project.created_by != self.request.user:
-            raise PermissionDenied("Solo el creador puede modificar la configuración del board.")
+        require_perm(self.request.user, serializer.instance.project, "can_manage_board")
         serializer.save()
 
     def perform_destroy(self, instance):
-        if instance.project.created_by != self.request.user:
-            raise PermissionDenied("Solo el creador puede eliminar boards.")
+        require_perm(self.request.user, instance.project, "can_manage_board")
         instance.delete()
 
 
@@ -670,16 +749,19 @@ class BoardColumnViewSet(viewsets.ModelViewSet):
             BoardColumn.objects.filter(board=instance.board, is_review=True).exclude(pk=instance.pk).update(is_review=False)
 
     def perform_create(self, serializer):
+        board = serializer.validated_data.get('board')
+        if board:
+            require_perm(self.request.user, board.project, "can_manage_board")
         instance = serializer.save()
         self._enforce_single_review(instance)
 
     def perform_update(self, serializer):
+        require_perm(self.request.user, serializer.instance.board.project, "can_manage_board")
         instance = serializer.save()
         self._enforce_single_review(instance)
 
     def perform_destroy(self, instance):
-        if instance.board.project.created_by != self.request.user:
-            raise PermissionDenied("Solo el creador puede eliminar columnas del board.")
+        require_perm(self.request.user, instance.board.project, "can_manage_board")
         instance.delete()
 
     @action(detail=False, methods=['post'], url_path='reorder')
@@ -705,6 +787,14 @@ class BoardColumnViewSet(viewsets.ModelViewSet):
         )
         if set(column_ids) - accessible:
             return Response({"detail": "Algunas columnas no son accesibles."}, status=status.HTTP_403_FORBIDDEN)
+
+        # Reordering columns is a board-management action.
+        affected_projects = Project.objects.filter(
+            boards__columns__id_column__in=accessible
+        ).distinct()
+        for proj in affected_projects:
+            if not has_project_perm(user, proj, "can_manage_board"):
+                return Response({"detail": "Tu rol no puede gestionar el tablero."}, status=status.HTTP_403_FORBIDDEN)
 
         for item in items:
             col_id = item.get('id_column')
@@ -739,9 +829,18 @@ class SprintViewSet(viewsets.ModelViewSet):
             qs = qs.filter(status=sprint_status)
         return qs
 
+    def perform_create(self, serializer):
+        project = serializer.validated_data.get('project')
+        if project:
+            require_perm(self.request.user, project, "can_manage_sprints")
+        serializer.save()
+
+    def perform_update(self, serializer):
+        require_perm(self.request.user, serializer.instance.project, "can_manage_sprints")
+        serializer.save()
+
     def perform_destroy(self, instance):
-        if instance.project.created_by != self.request.user:
-            raise PermissionDenied("Solo el creador puede eliminar sprints.")
+        require_perm(self.request.user, instance.project, "can_manage_sprints")
         instance.delete()
 
 
@@ -781,20 +880,22 @@ class MilestoneViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         project = serializer.validated_data.get('project')
+        if project:
+            require_perm(self.request.user, project, "can_manage_milestones")
         due_date = serializer.validated_data.get('due_date')
         self._validate_due_date(project, due_date)
         serializer.save()
 
     def perform_update(self, serializer):
         instance = self.get_object()
+        require_perm(self.request.user, instance.project, "can_manage_milestones")
         project = serializer.validated_data.get('project', instance.project)
         due_date = serializer.validated_data.get('due_date', instance.due_date)
         self._validate_due_date(project, due_date)
         serializer.save()
 
     def perform_destroy(self, instance):
-        if instance.project.created_by != self.request.user:
-            raise PermissionDenied("Solo el creador puede eliminar milestones.")
+        require_perm(self.request.user, instance.project, "can_manage_milestones")
         instance.delete()
 
 
@@ -813,9 +914,18 @@ class TagViewSet(viewsets.ModelViewSet):
             qs = qs.filter(project_id=project_id)
         return qs
 
+    def perform_create(self, serializer):
+        project = serializer.validated_data.get('project')
+        if project:
+            require_perm(self.request.user, project, "can_manage_tags")
+        serializer.save()
+
+    def perform_update(self, serializer):
+        require_perm(self.request.user, serializer.instance.project, "can_manage_tags")
+        serializer.save()
+
     def perform_destroy(self, instance):
-        if instance.project.created_by != self.request.user:
-            raise PermissionDenied("Solo el creador puede eliminar etiquetas.")
+        require_perm(self.request.user, instance.project, "can_manage_tags")
         instance.delete()
 
 
@@ -895,6 +1005,34 @@ class TaskViewSet(viewsets.ModelViewSet):
 
         return qs.distinct().prefetch_related('assignments__assigned_to', 'tags', 'subtasks')
 
+    def perform_create(self, serializer):
+        project = serializer.validated_data.get('project')
+        if project:
+            require_perm(self.request.user, project, "can_create_tasks")
+        serializer.save()
+
+    def perform_update(self, serializer):
+        instance = serializer.instance
+        project = instance.project
+        data = serializer.validated_data
+
+        # Moving a task (changing its board column) needs can_move_tasks + the role's
+        # column cap; editing any other field needs can_edit_tasks.
+        moving = 'board_column' in data and data['board_column'] != instance.board_column
+        editing = any(field != 'board_column' for field in data.keys())
+
+        if moving:
+            allowed, reason = can_move_task_to_column(self.request.user, project, data['board_column'])
+            if not allowed:
+                raise PermissionDenied(reason or "Tu rol no puede mover esta tarea.")
+        if editing:
+            require_perm(self.request.user, project, "can_edit_tasks")
+        serializer.save()
+
+    def perform_destroy(self, instance):
+        require_perm(self.request.user, instance.project, "can_delete_tasks")
+        instance.delete()
+
     @extend_schema(
         responses={200: dict},
         tags=["tasks"],
@@ -972,6 +1110,7 @@ class TaskViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'], url_path='ai-review')
     def ai_review(self, request, pk=None):
         task = self.get_object()  # get_queryset already enforces project membership
+        require_perm(request.user, task.project, "can_trigger_ai")
 
         subtasks = list(task.subtasks.all())
         if not subtasks:
@@ -1036,6 +1175,12 @@ class TaskCommentViewSet(viewsets.ModelViewSet):
             qs = qs.filter(task_id=task_id)
         return qs
 
+    def perform_create(self, serializer):
+        task = serializer.validated_data.get('task')
+        if task:
+            require_perm(self.request.user, task.project, "can_comment")
+        serializer.save()
+
     def perform_update(self, serializer):
         user = self.request.user
         comment = serializer.instance
@@ -1067,6 +1212,16 @@ class TaskAssignmentViewSet(viewsets.ModelViewSet):
         if user_id_param is not None:
             qs = qs.filter(assigned_to_id=user_id_param)
         return qs
+
+    def perform_create(self, serializer):
+        task = serializer.validated_data.get('task')
+        if task:
+            require_perm(self.request.user, task.project, "can_edit_tasks")
+        serializer.save()
+
+    def perform_destroy(self, instance):
+        require_perm(self.request.user, instance.task.project, "can_edit_tasks")
+        instance.delete()
 
 
 class ActivityLogViewSet(viewsets.ModelViewSet):
