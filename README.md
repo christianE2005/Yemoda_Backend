@@ -101,9 +101,14 @@ Swagger UI: `http://127.0.0.1:8001/api/docs/`
 | `JWT_ALGORITHM` | Algoritmo JWT (`HS256`) |
 | `JWT_EXPIRE_MINUTES` | Minutos de expiración del access token |
 | `JWT_REFRESH_EXPIRE_MINUTES` | Minutos de expiración del refresh token |
-| `CORS_ALLOWED_ORIGINS` | Orígenes CORS separados por coma (sin slash final) |
-| `CORS_ALLOW_ALL_ORIGINS` | `false` por defecto. Las credenciales cross-origin están deshabilitadas (la auth es por Bearer token, no cookies). |
+| `CORS_ALLOWED_ORIGINS` | Orígenes CORS **explícitos** separados por coma, sin slash final (ej. `https://yemoda.site`). **Requerido en producción** porque las credenciales cross-origin están habilitadas (cookie de refresh) y un origen `*` es incompatible con credenciales. |
+| `CORS_ALLOW_ALL_ORIGINS` | `false` por defecto. **No lo pongas en `true`** mientras uses la cookie de refresh (los navegadores rechazan `*` + credenciales). |
 | `EMAIL_VERIFICATION_GRACE_DAYS` | Días que una cuenta sin verificar puede usar la API antes de bloquearse (default `3`). |
+| `REFRESH_COOKIE_NAME` | Nombre de la cookie HttpOnly del refresh token (default `yemoda_refresh`). |
+| `REFRESH_COOKIE_SECURE` | `true` por defecto (cookie solo por HTTPS). Pon `false` solo en desarrollo local sin HTTPS. |
+| `REFRESH_COOKIE_SAMESITE` | `Lax` por defecto (válido si front y back comparten dominio registrable, ej. `yemoda.site` + `api.yemoda.site`). Usa `None` si el front vive en otro dominio (ej. `*.vercel.app`) — entonces `REFRESH_COOKIE_SECURE` debe ser `true`. |
+| `REFRESH_COOKIE_DOMAIN` | Vacío = host-only (recomendado). O `.yemoda.site` para compartir entre subdominios. |
+| `REFRESH_COOKIE_PATH` | Ruta de la cookie (default `/api/auth/` — solo se envía a los endpoints de auth). |
 | `GITHUB_APP_ID` | ID numérico de la GitHub App |
 | `GITHUB_APP_SLUG` | Slug de la GitHub App |
 | `GITHUB_APP_CLIENT_ID` | Client ID de la GitHub App |
@@ -531,8 +536,9 @@ Reentrena el modelo bajo demanda. Requiere al menos **3 proyectos** con `status=
 Controles aplicados (auditoría de seguridad — críticos, altos, medios y bajos remediados):
 
 ### Autenticación y sesiones
+- **Refresh token en cookie `HttpOnly`** (no legible por JS → no exfiltrable por XSS). Se emite/rota en login, refresh, cambio de contraseña y callbacks OAuth, y se borra en `POST /api/auth/logout/`. El `/api/auth/refresh/` lo lee de la cookie (con fallback al body para migrar clientes antiguos sin forzar re-login). Solo el **access token** (corto) viaja al cliente. Atributos configurables (`REFRESH_COOKIE_*`); por defecto `SameSite=Lax` para deploy same-site (subdominios de `yemoda.site`).
 - **JWT con revocación**: cada usuario tiene un `token_version`; los JWT lo incluyen como claim `tv`. Al **cambiar la contraseña** se incrementa, invalidando todos los tokens previos (access + refresh). El endpoint de cambio de contraseña devuelve tokens frescos para no desloguear al cliente actual.
-- **Tokens OAuth en el fragmento de URL (`#`)**, no en el query string — los callbacks de Google/GitHub entregan los tokens en `#…` (no se envían al servidor → sin fuga por `Referer`/logs) y el frontend los limpia del historial tras consumirlos.
+- **El access token OAuth viaja en el fragmento de URL (`#`)**, no en el query string (no se envía al servidor → sin fuga por `Referer`/logs) y el frontend lo limpia del historial; el refresh token **nunca** aparece en la URL (va por la cookie).
 - **Verificación de email**: ventana de gracia para cuentas sin verificar configurable y corta (`EMAIL_VERIFICATION_GRACE_DAYS`, default 3 días).
 - `DJANGO_SECRET_KEY`/`JWT_SECRET_KEY` nunca usan una clave pública por defecto; si faltan se genera una aleatoria por proceso (configúralas estables en producción).
 
@@ -557,8 +563,8 @@ Controles aplicados (auditoría de seguridad — críticos, altos, medios y bajo
 
 ### Configuración
 - No subir `.env` al repositorio (en `.gitignore`); usar secretos distintos para `DJANGO_SECRET_KEY` y `JWT_SECRET_KEY`.
-- CORS: `CORS_ALLOW_ALL_ORIGINS=false` por defecto y **credenciales cross-origin deshabilitadas** (auth por Bearer, no cookies).
+- CORS: `CORS_ALLOW_ALL_ORIGINS=false` por defecto. Las **credenciales cross-origin están habilitadas** (para la cookie de refresh), así que `CORS_ALLOWED_ORIGINS` **debe** listar orígenes explícitos en producción (nunca `*`).
 - El endpoint de instalación de GitHub App (`/api/github/app/install/start/`) requiere rol **Admin** (`system_role_id=1`).
 - `/api/roles/` requiere autenticación (ya no es público).
 
-> **Nota de localStorage (pendiente/opcional):** el frontend guarda los JWT en `localStorage`, por lo que un XSS podría exfiltrarlos. La API es Bearer (no cookies), así que el CSRF clásico no aplica; para máxima defensa se podría migrar a cookies `HttpOnly` + CSRF token.
+> **CSRF:** la cookie de refresh es `SameSite=Lax` y solo se usa en `/api/auth/refresh/` (POST), que no expone su respuesta cross-origin (CORS). El resto de la API sigue siendo Bearer (header `Authorization`), inmune a CSRF. El access token vive en memoria/`localStorage` del front pero es de corta duración.

@@ -137,6 +137,31 @@ def _issue_tokens(user: UserAccount) -> dict:
     }
 
 
+def _set_refresh_cookie(response, refresh_token: str):
+    """Attach the refresh token as an HttpOnly cookie (kept out of JS-readable storage)."""
+    response.set_cookie(
+        settings.REFRESH_COOKIE_NAME,
+        refresh_token,
+        max_age=settings.JWT_REFRESH_EXPIRE_MINUTES * 60,
+        httponly=True,
+        secure=settings.REFRESH_COOKIE_SECURE,
+        samesite=settings.REFRESH_COOKIE_SAMESITE,
+        domain=settings.REFRESH_COOKIE_DOMAIN,
+        path=settings.REFRESH_COOKIE_PATH,
+    )
+    return response
+
+
+def _clear_refresh_cookie(response):
+    """Remove the refresh-token cookie (logout / revoked session)."""
+    response.delete_cookie(
+        settings.REFRESH_COOKIE_NAME,
+        domain=settings.REFRESH_COOKIE_DOMAIN,
+        path=settings.REFRESH_COOKIE_PATH,
+    )
+    return response
+
+
 def _github_headers(access_token: str) -> dict:
     return {
         "Accept": "application/vnd.github+json",
@@ -1348,7 +1373,10 @@ class LoginView(APIView):
             # Within 7-day grace period — allow login
 
         tokens = _issue_tokens(user)
-        return Response({**tokens, "user": UserAccountSerializer(user).data}, status=status.HTTP_200_OK)
+        # Refresh token goes in an HttpOnly cookie. It is still included in the body for
+        # backward compatibility during rollout; the updated SPA ignores the body value.
+        resp = Response({**tokens, "user": UserAccountSerializer(user).data}, status=status.HTTP_200_OK)
+        return _set_refresh_cookie(resp, tokens["refresh_token"])
 
 
 class RefreshView(APIView):
@@ -1362,10 +1390,14 @@ class RefreshView(APIView):
         tags=["auth"],
     )
     def post(self, request):
-        serializer = RefreshSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-
-        refresh_token = serializer.validated_data["refresh_token"]
+        # Prefer the HttpOnly cookie; fall back to a body token (legacy clients / migration).
+        refresh_token = request.COOKIES.get(settings.REFRESH_COOKIE_NAME)
+        if not refresh_token:
+            serializer = RefreshSerializer(data=request.data)
+            serializer.is_valid(raise_exception=True)
+            refresh_token = serializer.validated_data.get("refresh_token")
+        if not refresh_token:
+            return Response({"detail": "Refresh token requerido."}, status=status.HTTP_401_UNAUTHORIZED)
 
         try:
             payload = jwt.decode(
@@ -1390,7 +1422,7 @@ class RefreshView(APIView):
             return Response({"detail": "Sesión revocada. Inicia sesión de nuevo."}, status=status.HTTP_401_UNAUTHORIZED)
 
         tokens = _issue_tokens(user)
-        return Response(
+        resp = Response(
             {
                 "access_token": tokens["access_token"],
                 "token_type": tokens["token_type"],
@@ -1398,6 +1430,8 @@ class RefreshView(APIView):
             },
             status=status.HTTP_200_OK,
         )
+        # Rotate the refresh cookie on every refresh (also migrates legacy body-token clients).
+        return _set_refresh_cookie(resp, tokens["refresh_token"])
 
 
 class ChangePasswordView(APIView):
@@ -1425,10 +1459,22 @@ class ChangePasswordView(APIView):
         request.user.token_version = (getattr(request.user, "token_version", 0) or 0) + 1
         request.user.save(update_fields=["password_hash", "token_version"])
         tokens = _issue_tokens(request.user)
-        return Response(
+        resp = Response(
             {"detail": "Contraseña actualizada correctamente.", **tokens},
             status=status.HTTP_200_OK,
         )
+        # Re-issue the refresh cookie with the new token_version (the old one is now revoked).
+        return _set_refresh_cookie(resp, tokens["refresh_token"])
+
+
+class LogoutView(APIView):
+    """Clears the HttpOnly refresh cookie. The access token is short-lived and discarded client-side."""
+    permission_classes = [AllowAny]
+
+    @extend_schema(responses={200: dict}, tags=["auth"])
+    def post(self, request):
+        resp = Response({"detail": "Sesión cerrada."}, status=status.HTTP_200_OK)
+        return _clear_refresh_cookie(resp)
 
 
 class VerifyEmailView(APIView):
@@ -1697,16 +1743,15 @@ class GoogleOauthCallbackView(APIView):
             user.save(update_fields=["is_email_verified"])
 
         tokens = _issue_tokens(user)
-        # Deliver tokens in the URL fragment (#), not the query string: fragments are not sent
-        # to servers, so they don't leak via the Referer header or proxy/server access logs.
+        # Only the short-lived access token goes in the URL fragment (not sent to servers, so no
+        # Referer/log leak). The refresh token is set as an HttpOnly cookie — never in the URL.
         redirect_url = (
             f"{frontend_redirect}"
             f"#access_token={tokens['access_token']}"
-            f"&refresh_token={tokens['refresh_token']}"
             f"&expires_at={tokens['expires_at']}"
             f"&needs_nickname={'1' if needs_nickname else '0'}"
         )
-        return HttpResponseRedirect(redirect_url)
+        return _set_refresh_cookie(HttpResponseRedirect(redirect_url), tokens["refresh_token"])
 
 
 class GithubAppInstallStartView(APIView):
@@ -1922,15 +1967,14 @@ class GithubAppOauthCallbackView(APIView):
             except (ValueError, TypeError):
                 pass
 
-        # Tokens go in the URL fragment (#), not the query string — fragments aren't sent to
-        # servers, avoiding Referer / access-log leakage of the bearer + refresh tokens.
+        # Only the short-lived access token goes in the URL fragment; the refresh token is set
+        # as an HttpOnly cookie and never appears in the URL.
         redirect_url = (
             f"{frontend_redirect}"
             f"#access_token={payload['access_token']}"
-            f"&refresh_token={payload['refresh_token']}"
             f"&expires_at={payload['expires_at']}"
         )
-        return HttpResponseRedirect(redirect_url)
+        return _set_refresh_cookie(HttpResponseRedirect(redirect_url), payload["refresh_token"])
 
     def post(self, request):
         serializer = GithubOauthCallbackSerializer(data=request.data)
@@ -1942,7 +1986,11 @@ class GithubAppOauthCallbackView(APIView):
         )
         if error:
             return Response({"detail": error}, status=status_code)
-        return Response(payload, status=status_code)
+        resp = Response(payload, status=status_code)
+        # Also set the refresh cookie for the connection (POST) flow used by the SPA.
+        if isinstance(payload, dict) and payload.get("refresh_token"):
+            _set_refresh_cookie(resp, payload["refresh_token"])
+        return resp
 
 
 class GithubAppLinkInstallationView(APIView):

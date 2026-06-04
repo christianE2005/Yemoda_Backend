@@ -213,9 +213,22 @@ GITHUB_APP_WEBHOOK_TARGET_URL = os.getenv("GITHUB_APP_WEBHOOK_TARGET_URL", "")
 GITHUB_APP_STATE_SECRET = os.getenv("GITHUB_APP_STATE_SECRET", JWT_SECRET_KEY)
 FASTAPI_CHAT_BASE_URL = os.getenv("FASTAPI_CHAT_BASE_URL", "https://fast.yemoda.site")
 CORS_ALLOW_ALL_ORIGINS = os.getenv("CORS_ALLOW_ALL_ORIGINS", "false").lower() == "true"
-# Auth is bearer-token (Authorization header), not cookies — never allow credentialed CORS
-# (a wildcard origin combined with credentials would be a serious cross-origin exposure).
-CORS_ALLOW_CREDENTIALS = False
+# The refresh token is delivered as an HttpOnly cookie, so the browser must be allowed to
+# send credentials cross-origin. This REQUIRES explicit CORS_ALLOWED_ORIGINS (never combine
+# credentials with CORS_ALLOW_ALL_ORIGINS / a "*" origin — browsers reject that).
+CORS_ALLOW_CREDENTIALS = True
+
+# ── Refresh-token cookie (HttpOnly) ──────────────────────────────────────────
+# The refresh token lives in an HttpOnly cookie (not readable by JS) instead of being handed
+# to the SPA for localStorage. Defaults fit a same-site subdomain deploy (frontend yemoda.site
+# + backend api.yemoda.site → SameSite=Lax suffices). If the frontend ever lives on a different
+# registrable domain (e.g. *.vercel.app), set REFRESH_COOKIE_SAMESITE=None (Secure must then be
+# true) so the cookie is sent on cross-site requests.
+REFRESH_COOKIE_NAME = os.getenv("REFRESH_COOKIE_NAME", "yemoda_refresh")
+REFRESH_COOKIE_SECURE = os.getenv("REFRESH_COOKIE_SECURE", "true").lower() == "true"
+REFRESH_COOKIE_SAMESITE = os.getenv("REFRESH_COOKIE_SAMESITE", "Lax")  # "Lax" | "Strict" | "None"
+REFRESH_COOKIE_DOMAIN = os.getenv("REFRESH_COOKIE_DOMAIN", "").strip() or None  # e.g. ".yemoda.site"; empty = host-only
+REFRESH_COOKIE_PATH = os.getenv("REFRESH_COOKIE_PATH", "/api/auth/")
 
 # Stripe
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")

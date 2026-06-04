@@ -384,7 +384,9 @@ class LoginSerializer(serializers.Serializer):
 
 
 class RefreshSerializer(serializers.Serializer):
-    refresh_token = serializers.CharField(write_only=True)
+    # Optional: the refresh token normally arrives via the HttpOnly cookie; the body is only
+    # used as a fallback for legacy clients / migration.
+    refresh_token = serializers.CharField(write_only=True, required=False, allow_blank=True)
 
 
 class ChangePasswordSerializer(serializers.Serializer):
