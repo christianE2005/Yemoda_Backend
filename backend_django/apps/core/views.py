@@ -3562,8 +3562,9 @@ class HealthCheckView(APIView):
         return Response({"status": "ok"}, status=status.HTTP_200_OK)
 
 
-# Jerarquía de planes: valores más altos indican mayor nivel.
-_PLAN_RANK = {"monthly": 1, "annual": 2}
+# Only a single monthly subscription tier exists. Kept as a rank map so the webhook can tell
+# a first-time subscription (rank 0 → 1) from a no-op renewal.
+_PLAN_RANK = {"monthly": 1}
 
 
 def _sync_project_subscription_seats(project) -> None:
@@ -3618,12 +3619,8 @@ class CreateCheckoutSessionView(APIView):
         import stripe
         stripe.api_key = settings.STRIPE_SECRET_KEY
 
-        plan = (request.data.get("plan") or "monthly").strip().lower()
-        if plan not in _PLAN_RANK:
-            return Response(
-                {"detail": "Plan inválido. Usa 'monthly' o 'annual'."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        # Only a single monthly plan exists; ignore any client-supplied plan value.
+        plan = "monthly"
 
         user = request.user
 
@@ -3642,14 +3639,10 @@ class CreateCheckoutSessionView(APIView):
         if project.plan == Project.PLAN_PRO:
             return Response({"detail": "Este proyecto ya tiene el plan Pro."}, status=status.HTTP_409_CONFLICT)
 
-        if plan == "annual":
-            price_id = settings.STRIPE_PRICE_ID_ANNUAL
-        else:
-            price_id = settings.STRIPE_PRICE_ID_MONTHLY
-
+        price_id = settings.STRIPE_PRICE_ID_MONTHLY
         if not price_id:
             return Response(
-                {"detail": f"STRIPE_PRICE_ID_{plan.upper()} not configured."},
+                {"detail": "STRIPE_PRICE_ID_MONTHLY not configured."},
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
 
@@ -3715,7 +3708,7 @@ class StripeWebhookView(APIView):
 
             # Persistir el plan desde metadata (fuente de verdad: la sesión de Stripe)
             plan_from_meta = (session_data.get("metadata") or {}).get("plan") or payment.plan
-            if plan_from_meta in ("monthly", "annual"):
+            if plan_from_meta == "monthly":
                 payment.plan = plan_from_meta
 
             payment.save()

@@ -248,8 +248,7 @@ AI_METERING_ENFORCE = os.getenv("AI_METERING_ENFORCE", "true").lower() == "true"
 # Stripe
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
-STRIPE_PRICE_ID_MONTHLY = os.getenv("STRIPE_PRICE_ID_MONTHLY", "")
-STRIPE_PRICE_ID_ANNUAL = os.getenv("STRIPE_PRICE_ID_ANNUAL", "")
+STRIPE_PRICE_ID_MONTHLY = os.getenv("STRIPE_PRICE_ID_MONTHLY", "")  # per-seat monthly price ($12/seat)
 STRIPE_SUCCESS_URL = os.getenv("STRIPE_SUCCESS_URL", "https://yemoda.site/payment/success")
 STRIPE_CANCEL_URL = os.getenv("STRIPE_CANCEL_URL", "https://yemoda.site/payment/cancel")
 
