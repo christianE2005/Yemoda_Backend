@@ -7,12 +7,58 @@ ProjectMember row. `max_move_column` caps how far a role may move a task on the 
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
+from django.conf import settings
 from rest_framework.exceptions import PermissionDenied
 
-from .models import BoardColumn, ProjectMember, ProjectRole
+from .models import BoardColumn, ProjectAiUsage, ProjectMember, ProjectRole
 
 # Default role set seeded for every new project.
 _ALL_PERMS = ProjectRole.PERMISSION_FIELDS
+
+
+def project_seat_count(project) -> int:
+    """Number of billable seats in a project (its members; never below 1)."""
+    return max(ProjectMember.objects.filter(project=project).count(), 1)
+
+
+def project_ai_entitlements(project) -> dict:
+    """Monthly AI quota per category for a project, by plan.
+
+    Pro: per-seat allowance × seats (pooled). Free: a flat cap for the whole project.
+    """
+    seats = project_seat_count(project)
+    plan = getattr(project, "plan", "free")
+    if plan == "pro":
+        return {
+            "plan": "pro",
+            "seats": seats,
+            "reviews": settings.AI_QUOTA_REVIEWS_PER_SEAT * seats,
+            "chat": settings.AI_QUOTA_CHAT_PER_SEAT * seats,
+            "aifix": settings.AI_QUOTA_AIFIX_PER_SEAT * seats,
+        }
+    return {
+        "plan": "free",
+        "seats": seats,
+        "reviews": settings.AI_FREE_QUOTA_REVIEWS,
+        "chat": settings.AI_FREE_QUOTA_CHAT,
+        "aifix": settings.AI_FREE_QUOTA_AIFIX,
+    }
+
+
+def project_ai_usage_remaining(project, category: str) -> int:
+    """Remaining AI calls of a category this month. Effectively unlimited when enforcement is off."""
+    if not settings.AI_METERING_ENFORCE:
+        return 1_000_000
+    period = datetime.now(timezone.utc).strftime("%Y-%m")
+    row = ProjectAiUsage.objects.filter(project=project, period=period).first()
+    used = {
+        "reviews": (row.reviews_used if row else 0),
+        "chat": (row.chat_used if row else 0),
+        "aifix": (row.aifix_used if row else 0),
+    }[category]
+    return max(project_ai_entitlements(project)[category] - used, 0)
 
 
 def _user_id(user) -> int | None:

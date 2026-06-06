@@ -12,7 +12,6 @@ import requests
 from django.conf import settings
 from django.contrib.auth.hashers import check_password, make_password
 from django.http import HttpResponse, HttpResponseRedirect, JsonResponse, StreamingHttpResponse
-from django.db import models
 from django.db import DatabaseError
 from django.db.models import Q
 from django.utils import timezone as django_timezone
@@ -36,6 +35,7 @@ from .models import (
     GithubRepo,
     Milestone,
     Project,
+    ProjectAiUsage,
     ProjectMember,
     ProjectRepo,
     ProjectRole,
@@ -97,6 +97,8 @@ from .permissions import (
 )
 
 GITHUB_API_URL = "https://api.github.com"
+
+MAX_COLUMNS_PER_BOARD = 6
 
 
 def _slugify(text: str) -> str:
@@ -533,6 +535,34 @@ class ProjectViewSet(viewsets.ModelViewSet):
         project = self.get_object()  # get_queryset enforces membership
         return Response(resolve_capabilities(request.user, project))
 
+    @extend_schema(responses={200: dict}, tags=["projects"], summary="Uso y cuota mensual de IA del proyecto")
+    @action(detail=True, methods=['get'], url_path='ai-usage')
+    def ai_usage(self, request, pk=None):
+        """Current-month AI usage vs quota per category, for the UI meter + upgrade CTA."""
+        from datetime import datetime, timezone
+
+        from .permissions import project_ai_entitlements
+
+        project = self.get_object()  # get_queryset enforces membership
+        period = datetime.now(timezone.utc).strftime("%Y-%m")
+        usage = ProjectAiUsage.objects.filter(project=project, period=period).first()
+        ent = project_ai_entitlements(project)
+        used = {
+            "reviews": usage.reviews_used if usage else 0,
+            "chat": usage.chat_used if usage else 0,
+            "aifix": usage.aifix_used if usage else 0,
+        }
+        quota = {k: ent[k] for k in ("reviews", "chat", "aifix")}
+        return Response({
+            "period": period,
+            "plan": ent["plan"],
+            "seats": ent["seats"],
+            "enforced": settings.AI_METERING_ENFORCE,
+            "quota": quota,
+            "used": used,
+            "remaining": {k: max(quota[k] - used[k], 0) for k in quota},
+        })
+
 
 class RoleViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = Role.objects.all()
@@ -608,6 +638,10 @@ class ProjectMemberViewSet(viewsets.ModelViewSet):
                             admin_token,
                         )
 
+        # Keep Stripe per-seat billing in sync with the new member count.
+        if project:
+            _sync_project_subscription_seats(project)
+
     def get_queryset(self):
         user = self.request.user
         user_projects = Project.objects.filter(
@@ -641,6 +675,8 @@ class ProjectMemberViewSet(viewsets.ModelViewSet):
         if instance.user != user and not has_project_perm(user, project, "can_manage_members"):
             raise PermissionDenied("No tienes permiso para eliminar a otros miembros.")
         instance.delete()
+        # Keep Stripe per-seat billing in sync with the reduced member count.
+        _sync_project_subscription_seats(project)
 
 
 class ProjectMembersView(APIView):
@@ -691,6 +727,9 @@ class ProjectMembersView(APIView):
         assert_can_assign_role(request.user, project, project_role)
 
         member = ProjectMember.objects.create(project=project, user=user, role=role, project_role=project_role)
+
+        # Keep Stripe per-seat billing in sync with the new member count.
+        _sync_project_subscription_seats(project)
 
         # If the project has linked repos, add the new member as a collaborator on GitHub
         # Use the project creator's OAuth token (they have admin on the repos)
@@ -797,6 +836,8 @@ class BoardColumnViewSet(viewsets.ModelViewSet):
         board = serializer.validated_data.get('board')
         if board:
             require_perm(self.request.user, board.project, "can_manage_board")
+            if BoardColumn.objects.filter(board=board).count() >= MAX_COLUMNS_PER_BOARD:
+                raise ValidationError({'detail': 'A board can have at most 6 columns.'})
         instance = serializer.save()
         self._enforce_single_review(instance)
 
@@ -913,7 +954,6 @@ class MilestoneViewSet(viewsets.ModelViewSet):
     def _validate_due_date(self, project, due_date):
         if due_date is None:
             return
-        from datetime import date as date_type
         project_created_date = project.created_at.date() if hasattr(project.created_at, 'date') else project.created_at
         if isinstance(due_date, str):
             from datetime import date as _date
@@ -1168,6 +1208,17 @@ class TaskViewSet(viewsets.ModelViewSet):
             return Response(
                 {"detail": f"Aún hay {len(open_subtasks)} subtarea(s) sin completar.", "open_subtasks": len(open_subtasks)},
                 status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Quota pre-check (the FastAPI service is the actual consumer; this surfaces 402 to the UI).
+        from .permissions import project_ai_usage_remaining
+        if project_ai_usage_remaining(task.project, "reviews") <= 0:
+            return Response(
+                {
+                    "detail": "Se alcanzó la cuota de revisiones de IA de este proyecto este mes. Mejora el plan o espera al próximo ciclo.",
+                    "code": "ai_quota_reached",
+                },
+                status=status.HTTP_402_PAYMENT_REQUIRED,
             )
 
         base = (settings.FASTAPI_CHAT_BASE_URL or "").rstrip("/")
@@ -1754,19 +1805,72 @@ class GoogleOauthCallbackView(APIView):
         return _set_refresh_cookie(HttpResponseRedirect(redirect_url), tokens["refresh_token"])
 
 
-class GithubAppInstallStartView(APIView):
-    """
-    Endpoint reservado para administradores de la organización.
-    Los usuarios normales NO deben usar este endpoint — la App ya está instalada en la org.
-    El flujo de usuarios es únicamente OAuth (/api/github/app/oauth/start/).
-    """
-    permission_classes = [IsAdminUser]
+def _sync_user_installations(user, access_token: str) -> bool:
+    """Link the GitHub App installations the user can access (personal + orgs) to their account.
 
-    @extend_schema(responses={200: dict, 403: dict, 500: dict}, tags=["github-app"])
+    Queries GitHub for the user's installations and upserts a GithubAppInstallation row for
+    each, so detection no longer depends on a stale flag after a disconnect/reconnect cycle.
+    Returns True if the user has at least one installation. Best-effort: on a GitHub API error
+    it falls back to whatever is already linked in the DB.
+    """
+    try:
+        resp = requests.get(
+            f"{GITHUB_API_URL}/user/installations",
+            headers=_github_headers(access_token),
+            timeout=20,
+        )
+        if resp.status_code >= 400:
+            return GithubAppInstallation.objects.filter(user=user).exists()
+        installations = resp.json().get("installations", []) or []
+    except requests.RequestException:
+        return GithubAppInstallation.objects.filter(user=user).exists()
+
+    for inst in installations:
+        inst_id = inst.get("id")
+        if not inst_id:
+            continue
+        account = inst.get("account") or {}
+        acct_login = account.get("login", "")
+        acct_type = account.get("type")
+        is_personal = acct_type == "User"
+        existing = GithubAppInstallation.objects.filter(installation_id=inst_id).first()
+        if existing is None:
+            GithubAppInstallation.objects.create(
+                installation_id=inst_id,
+                account_login=acct_login,
+                account_type=acct_type,
+                user=user,
+            )
+        else:
+            existing.account_login = acct_login
+            existing.account_type = acct_type
+            # Only (re)claim ownership for the user's own personal installation, or if the row
+            # has no owner yet — never steal an org installation away from another member.
+            if is_personal or existing.user_id is None:
+                existing.user = user
+            existing.save()
+    return len(installations) > 0
+
+
+class GithubAppInstallStartView(APIView):
+    """Return the GitHub App installation URL so the user can install it on their personal
+    account or on an organization.
+
+    This is a SEPARATE, explicit action from login: login is pure OAuth
+    (GithubAppOauthStartView) and never forces the install page. A signed state + redirect_uri
+    are included so that after installing, GitHub sends the user back through the OAuth
+    callback, which links the new installation to their account.
+    """
+
+    @extend_schema(responses={200: dict, 500: dict}, tags=["github-app"])
     def get(self, request):
         if not settings.GITHUB_APP_SLUG:
             return Response({"detail": "GITHUB_APP_SLUG no configurado."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        install_url = f"https://github.com/apps/{settings.GITHUB_APP_SLUG}/installations/new"
+        state = _build_signed_oauth_state(user_id=getattr(request.user, 'id_user', None))
+        params = {"state": state}
+        if settings.GITHUB_APP_OAUTH_CALLBACK_URL:
+            params["redirect_uri"] = settings.GITHUB_APP_OAUTH_CALLBACK_URL
+        install_url = f"https://github.com/apps/{settings.GITHUB_APP_SLUG}/installations/new?{urlencode(params)}"
         return Response({"install_url": install_url}, status=status.HTTP_200_OK)
 
 
@@ -1782,11 +1886,6 @@ class GithubAppOauthStartView(APIView):
                 {"detail": "GITHUB_APP_CLIENT_ID o GITHUB_APP_OAUTH_CALLBACK_URL no configurados."},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
-        if not settings.GITHUB_APP_SLUG:
-            return Response(
-                {"detail": "GITHUB_APP_SLUG no configurado."},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
 
         user = _user_from_bearer_token(request)
         state = _build_signed_oauth_state(user_id=getattr(user, 'id_user', None))
@@ -1794,24 +1893,15 @@ class GithubAppOauthStartView(APIView):
             "state": state,
             "redirect_uri": settings.GITHUB_APP_OAUTH_CALLBACK_URL,
         }
-
-        # If the user already has the GitHub App installed on their account, skip
-        # the installation page and go straight to OAuth authorization.
-        # Otherwise, send them to the installation page which installs the App AND
-        # triggers OAuth in one step (requires "Request user authorization during
-        # installation" enabled in the GitHub App settings).
-        already_installed = (
-            user is not None
-            and GithubAppInstallation.objects.filter(user=user).exists()
+        # Login is ALWAYS pure OAuth authorization (identity only). It never forces the App
+        # installation page — that dead-ends users who already have the App installed (clicking
+        # their account there opens "configure", not a login). Installing the App is a separate,
+        # explicit action (GithubAppInstallStartView). After login, _sync_user_installations
+        # detects and links any existing installation.
+        authorize_url = (
+            f"https://github.com/login/oauth/authorize?{urlencode(params)}"
+            f"&client_id={settings.GITHUB_APP_CLIENT_ID}"
         )
-        if already_installed:
-            authorize_url = (
-                f"https://github.com/login/oauth/authorize?{urlencode(params)}"
-                f"&client_id={settings.GITHUB_APP_CLIENT_ID}"
-            )
-        else:
-            authorize_url = f"https://github.com/apps/{settings.GITHUB_APP_SLUG}/installations/new?{urlencode(params)}"
-
         return Response({"authorize_url": authorize_url, "state": state}, status=status.HTTP_200_OK)
 
 
@@ -1921,12 +2011,18 @@ class GithubAppOauthCallbackView(APIView):
             defaults=github_connection_defaults,
         )
 
+        # Detect & link any GitHub App installation the user has (personal or org). This tells
+        # the frontend whether to prompt for installation, and keeps detection accurate across
+        # disconnect/reconnect cycles.
+        has_installation = _sync_user_installations(user, access_token)
+
         tokens = _issue_tokens(user)
         return (
             {
                 **tokens,
                 "user": UserAccountSerializer(user).data,
                 "github_login": github_login,
+                "has_installation": has_installation,
             },
             None,
             status.HTTP_200_OK,
@@ -3470,6 +3566,53 @@ class HealthCheckView(APIView):
 _PLAN_RANK = {"monthly": 1, "annual": 2}
 
 
+def _sync_project_subscription_seats(project) -> None:
+    """Best-effort: set the project's Stripe subscription quantity to its member count (prorated).
+
+    Per-seat billing is dynamic: adding/removing members updates the subscription quantity so the
+    next invoice reflects the real seat count. No-op for Free projects or those without a sub.
+    """
+    if getattr(project, "plan", "free") != Project.PLAN_PRO or not project.stripe_subscription_id:
+        return
+    try:
+        import stripe
+        stripe.api_key = settings.STRIPE_SECRET_KEY
+        sub = stripe.Subscription.retrieve(project.stripe_subscription_id)
+        items = sub["items"]["data"]
+        if not items:
+            return
+        seats = max(ProjectMember.objects.filter(project=project).count(), 1)
+        stripe.Subscription.modify(
+            project.stripe_subscription_id,
+            items=[{"id": items[0]["id"], "quantity": seats}],
+            proration_behavior="create_prorations",
+        )
+    except Exception:
+        import logging
+        logging.getLogger(__name__).warning(
+            "Stripe seat sync failed for project %s", getattr(project, "id_project", None)
+        )
+
+
+def _drain_pending_reviews_async(project_id: int) -> None:
+    """Best-effort: ask the FastAPI service to retry queued reviews now that the quota changed."""
+    base = (settings.FASTAPI_CHAT_BASE_URL or "").rstrip("/")
+    if not base:
+        return
+    try:
+        requests.post(
+            f"{base}/webhook/drain-pending/",
+            json={"project_id": project_id},
+            headers={
+                "Content-Type": "application/json",
+                "X-Internal-Token": settings.GITHUB_APP_WEBHOOK_SECRET or "",
+            },
+            timeout=5,
+        )
+    except requests.RequestException:
+        pass
+
+
 class CreateCheckoutSessionView(APIView):
     def post(self, request):
         import stripe
@@ -3483,28 +3626,21 @@ class CreateCheckoutSessionView(APIView):
             )
 
         user = request.user
-        current_plan = user.subscription_plan  # None, 'monthly' o 'annual'
 
-        if current_plan is not None:
-            current_rank = _PLAN_RANK.get(current_plan, 0)
-            requested_rank = _PLAN_RANK[plan]
-
-            if requested_rank <= current_rank:
-                # Mismo nivel o downgrade: no permitido
-                msg = (
-                    f"Ya tienes el plan '{current_plan}' activo."
-                    if requested_rank == current_rank
-                    else f"No puedes pasar del plan '{current_plan}' a '{plan}' (downgrade no permitido)."
-                )
-                return Response(
-                    {
-                        "detail": msg,
-                        "current_plan": current_plan,
-                        "requested_plan": plan,
-                    },
-                    status=status.HTTP_409_CONFLICT,
-                )
-            # requested_rank > current_rank → upgrade permitido
+        # Per-project upgrade: the PROJECT (not the user) becomes Pro. Admin-only.
+        project_id = request.data.get("project_id")
+        if not project_id:
+            return Response({"detail": "project_id es requerido."}, status=status.HTTP_400_BAD_REQUEST)
+        project = Project.objects.filter(pk=project_id).first()
+        if not project:
+            return Response({"detail": "Proyecto no encontrado."}, status=status.HTTP_404_NOT_FOUND)
+        if not is_project_admin(request.user, project):
+            return Response(
+                {"detail": "Solo el administrador del proyecto puede mejorar el plan."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        if project.plan == Project.PLAN_PRO:
+            return Response({"detail": "Este proyecto ya tiene el plan Pro."}, status=status.HTTP_409_CONFLICT)
 
         if plan == "annual":
             price_id = settings.STRIPE_PRICE_ID_ANNUAL
@@ -3517,14 +3653,17 @@ class CreateCheckoutSessionView(APIView):
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
 
+        # Per-seat billing: quantity = current member count (dynamically synced on member changes).
+        seats = max(ProjectMember.objects.filter(project=project).count(), 1)
+
         try:
             session = stripe.checkout.Session.create(
-                line_items=[{"price": price_id, "quantity": 1}],
+                line_items=[{"price": price_id, "quantity": seats}],
                 mode="subscription",
                 success_url=settings.STRIPE_SUCCESS_URL,
                 cancel_url=settings.STRIPE_CANCEL_URL,
                 customer_email=user.email,
-                metadata={"user_id": str(user.id_user), "plan": plan},
+                metadata={"user_id": str(user.id_user), "project_id": str(project.id_project), "plan": plan},
             )
         except stripe.StripeError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
@@ -3608,6 +3747,20 @@ class StripeWebhookView(APIView):
                 update_fields.append("subscription_plan")
             user.save(update_fields=update_fields)
 
+            # Per-project upgrade: flip the paid project to Pro + store its subscription, then
+            # release any reviews queued while it was on the Free quota.
+            project_id_meta = (session_data.get("metadata") or {}).get("project_id")
+            if project_id_meta:
+                proj = Project.objects.filter(id_project=project_id_meta).first()
+                if proj:
+                    proj.plan = Project.PLAN_PRO
+                    proj_fields = ["plan"]
+                    if stripe_subscription_id:
+                        proj.stripe_subscription_id = stripe_subscription_id
+                        proj_fields.append("stripe_subscription_id")
+                    proj.save(update_fields=proj_fields)
+                    _drain_pending_reviews_async(proj.id_project)
+
         elif event["type"] == "customer.subscription.deleted":
             # Stripe confirma la cancelación efectiva (al final del período o inmediata)
             sub_data = event["data"]["object"]
@@ -3618,6 +3771,11 @@ class StripeWebhookView(APIView):
                 affected.update(
                     is_premium=False,
                     subscription_plan=None,
+                    stripe_subscription_id=None,
+                )
+                # Downgrade any project on this subscription back to Free.
+                Project.objects.filter(stripe_subscription_id=stripe_sub_id).update(
+                    plan=Project.PLAN_FREE,
                     stripe_subscription_id=None,
                 )
 
@@ -3652,17 +3810,26 @@ class CancelSubscriptionView(APIView):
         import stripe
         stripe.api_key = settings.STRIPE_SECRET_KEY
 
-        user = request.user
-
-        if not user.is_premium or not user.stripe_subscription_id:
+        project_id = request.data.get("project_id")
+        if not project_id:
+            return Response({"detail": "project_id es requerido."}, status=status.HTTP_400_BAD_REQUEST)
+        project = Project.objects.filter(pk=project_id).first()
+        if not project:
+            return Response({"detail": "Proyecto no encontrado."}, status=status.HTTP_404_NOT_FOUND)
+        if not is_project_admin(request.user, project):
             return Response(
-                {"detail": "No tienes una suscripción activa para cancelar."},
+                {"detail": "Solo el administrador del proyecto puede cancelar la suscripción."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        if project.plan != Project.PLAN_PRO or not project.stripe_subscription_id:
+            return Response(
+                {"detail": "Este proyecto no tiene una suscripción activa para cancelar."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
         try:
             subscription = stripe.Subscription.modify(
-                user.stripe_subscription_id,
+                project.stripe_subscription_id,
                 cancel_at_period_end=True,
             )
         except stripe.error.InvalidRequestError as exc:
@@ -3974,6 +4141,7 @@ class GithubConnectionStatusView(APIView):
                 "properties": {
                     "connected": {"type": "boolean"},
                     "github_login": {"type": "string", "nullable": True},
+                    "has_installation": {"type": "boolean", "description": "Si el usuario tiene la GitHub App instalada (cuenta personal u organización). Solo presente si connected=true."},
                     "reason": {"type": "string", "nullable": True, "description": "Solo presente si connected=false. Valor posible: 'token_expired'"},
                 },
             }
@@ -4006,7 +4174,11 @@ class GithubConnectionStatusView(APIView):
                 )
 
         return Response(
-            {"connected": True, "github_login": connection.github_login},
+            {
+                "connected": True,
+                "github_login": connection.github_login,
+                "has_installation": GithubAppInstallation.objects.filter(user=user).exists(),
+            },
             status=status.HTTP_200_OK,
         )
 

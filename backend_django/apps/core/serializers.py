@@ -132,9 +132,9 @@ class BoardSerializer(serializers.ModelSerializer):
         fields = "__all__"
 
     def validate_custom_instructions(self, value):
-        if value and len(value) > 500:
+        if value and len(value) > 1000:
             raise serializers.ValidationError(
-                "Custom instructions cannot exceed 500 characters."
+                "Custom instructions cannot exceed 1000 characters."
             )
         return value
 

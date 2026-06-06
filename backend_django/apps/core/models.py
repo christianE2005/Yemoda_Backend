@@ -91,6 +91,13 @@ class Project(models.Model):
         help_text="Comma-separated branch names to trigger AI review (e.g. main,develop). Leave empty to analyze all branches.",
     )
 
+    PLAN_FREE = "free"
+    PLAN_PRO = "pro"
+    PLAN_CHOICES = [(PLAN_FREE, "Free"), (PLAN_PRO, "Pro")]
+    # Billing plan that drives AI quotas. Free = flat cap; Pro = per-seat allowance.
+    plan = models.CharField(max_length=10, choices=PLAN_CHOICES, default=PLAN_FREE)
+    stripe_subscription_id = models.CharField(max_length=255, null=True, blank=True)
+
     class Meta:
         db_table = "project"
 
@@ -766,6 +773,34 @@ class TaskPushMatch(models.Model):
         db_table = "task_push_match"
         ordering = ["-created_at"]
         unique_together = ("task", "push")
+
+
+class ProjectAiUsage(models.Model):
+    """Per-project, per-month counter of AI calls by category, for quota enforcement."""
+    id_usage = models.BigAutoField(primary_key=True)
+    project = models.ForeignKey(Project, on_delete=models.CASCADE, db_column="id_project", related_name="ai_usage")
+    period = models.CharField(max_length=7)  # "YYYY-MM"
+    reviews_used = models.IntegerField(default=0)
+    chat_used = models.IntegerField(default=0)
+    aifix_used = models.IntegerField(default=0)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "project_ai_usage"
+        unique_together = ("project", "period")
+
+
+class PendingAiReview(models.Model):
+    """A push review deferred because the project's monthly review quota was exhausted (retried later)."""
+    id_pending = models.BigAutoField(primary_key=True)
+    project = models.ForeignKey(Project, on_delete=models.CASCADE, db_column="id_project", related_name="pending_ai_reviews")
+    push = models.ForeignKey(GithubPushEvent, on_delete=models.CASCADE, db_column="id_push", related_name="pending_reviews")
+    trigger = models.CharField(max_length=20, default="push")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "pending_ai_review"
+        ordering = ["created_at"]
 
 
 class GithubRepo(models.Model):

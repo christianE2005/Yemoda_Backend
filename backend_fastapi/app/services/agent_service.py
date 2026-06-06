@@ -273,8 +273,9 @@ Rules:
 - Only flag warnings if the code FAILS to implement a specific requirement stated in the story.
 - If a story has no explicit acceptance criteria, use the description to judge completeness.
 - If the code resolves an existing warning for a story, list its ID in "resolved_warning_ids".
-- Extract the most relevant code snippet (file path + changed lines, max 300 lines).
+- Extract the most relevant code snippet (file path + only the few changed lines that matter, max 25 lines — never whole files).
 - Assign a severity to each warning: "critical" (security vulnerability or data loss risk), "warning" (missing story requirement or broken behavior), "info" (minor gap or optional improvement).
+- Return AT MOST 15 new warnings per story — the most important ones by severity. Keep each "reason" to 1-2 sentences.
 - {lang_instruction}
 
 Respond ONLY with valid JSON:
@@ -341,9 +342,10 @@ For each matched story:
 3. Provide concrete, actionable warnings for: missing story requirements AND code quality/security issues.
 4. If the new code resolves any existing warning, list its ID in "resolved_warning_ids".
 5. Only flag NEW warnings not already listed in the active warnings.
-6. Extract the most relevant code snippet (file path + changed lines, max 300 lines).
+6. Extract the most relevant code snippet (file path + only the few changed lines that matter, max 25 lines — never whole files).
 7. Assign a severity to each warning: "critical" (security vulnerability, supply-chain risk, or data loss), "warning" (missing story requirement, broken behavior, or significant code quality issue), "info" (naming convention violation, minor style suggestion, or optional improvement).
-8. {lang_instruction}
+8. Return AT MOST 15 new warnings per story — the most important ones by severity. Keep each "reason" to 1-2 sentences.
+9. {lang_instruction}
 
 Respond ONLY with valid JSON:
 {{
@@ -483,7 +485,7 @@ def analyze_push(
             lang_instruction=lang_instruction,
         )
 
-    text = generate_content(prompt, json_mode=True).strip()
+    text = generate_content(prompt, json_mode=True, label="push_review").strip()
 
     # Strip markdown code fences if model ignored json_mode
     if text.startswith("```"):

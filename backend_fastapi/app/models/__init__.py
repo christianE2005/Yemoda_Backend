@@ -1,7 +1,9 @@
 from .models import (
     ActivityLog,
     Board,
+    PendingAiReview,
     Project,
+    ProjectAiUsage,
     ProjectMember,
     Role,
     Task,
@@ -22,4 +24,6 @@ __all__ = [
     "Task",
     "TaskComment",
     "ActivityLog",
+    "ProjectAiUsage",
+    "PendingAiReview",
 ]

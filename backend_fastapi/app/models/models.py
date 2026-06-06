@@ -30,6 +30,7 @@ class Project(Base):
         nullable=True,
     )
     github_repo_full_name: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    plan: Mapped[str] = mapped_column(String(10), nullable=False, default="free")
 
 
 class ProjectRepo(Base):
@@ -249,4 +250,38 @@ class TaskPushMatch(Base):
     coverage: Mapped[str] = mapped_column(String(10), nullable=False, default="partial")
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     code_snippet: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[DateTime] = mapped_column(DateTime, server_default=func.now())
+
+
+class ProjectAiUsage(Base):
+    __tablename__ = "project_ai_usage"
+
+    id_usage: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    id_project: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("project.id_project", ondelete="CASCADE"),
+        nullable=False,
+    )
+    period: Mapped[str] = mapped_column(String(7), nullable=False)  # "YYYY-MM"
+    reviews_used: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    chat_used: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    aifix_used: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    updated_at: Mapped[DateTime] = mapped_column(DateTime, server_default=func.now())
+
+
+class PendingAiReview(Base):
+    __tablename__ = "pending_ai_review"
+
+    id_pending: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    id_project: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("project.id_project", ondelete="CASCADE"),
+        nullable=False,
+    )
+    id_push: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("github_push_event.id_push", ondelete="CASCADE"),
+        nullable=False,
+    )
+    trigger: Mapped[str] = mapped_column(String(20), nullable=False, default="push")
     created_at: Mapped[DateTime] = mapped_column(DateTime, server_default=func.now())

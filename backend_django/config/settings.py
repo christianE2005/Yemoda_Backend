@@ -230,6 +230,21 @@ REFRESH_COOKIE_SAMESITE = os.getenv("REFRESH_COOKIE_SAMESITE", "Lax")  # "Lax" |
 REFRESH_COOKIE_DOMAIN = os.getenv("REFRESH_COOKIE_DOMAIN", "").strip() or None  # e.g. ".yemoda.site"; empty = host-only
 REFRESH_COOKIE_PATH = os.getenv("REFRESH_COOKIE_PATH", "/api/auth/")
 
+# ── AI usage quotas (metering) ───────────────────────────────────────────────
+# Per-seat monthly allowance, pooled across a project's members (seats). Must match the
+# values set on the FastAPI service (it enforces; Django only reports usage). When enforcement
+# is on and a project exhausts a category, chat/AI-fix calls are blocked (402) and push
+# reviews are queued for retry.
+# Pro plan: per-seat allowance, pooled across the project's members.
+AI_QUOTA_REVIEWS_PER_SEAT = int(os.getenv("AI_QUOTA_REVIEWS_PER_SEAT", "50"))
+AI_QUOTA_AIFIX_PER_SEAT = int(os.getenv("AI_QUOTA_AIFIX_PER_SEAT", "10"))
+AI_QUOTA_CHAT_PER_SEAT = int(os.getenv("AI_QUOTA_CHAT_PER_SEAT", "50"))
+# Free plan: a flat cap for the whole project (NOT multiplied by members).
+AI_FREE_QUOTA_REVIEWS = int(os.getenv("AI_FREE_QUOTA_REVIEWS", "10"))
+AI_FREE_QUOTA_AIFIX = int(os.getenv("AI_FREE_QUOTA_AIFIX", "1"))
+AI_FREE_QUOTA_CHAT = int(os.getenv("AI_FREE_QUOTA_CHAT", "10"))
+AI_METERING_ENFORCE = os.getenv("AI_METERING_ENFORCE", "true").lower() == "true"
+
 # Stripe
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")

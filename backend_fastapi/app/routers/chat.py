@@ -8,10 +8,15 @@ import logging
 import os
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from slowapi import Limiter
 from slowapi.util import get_remote_address
+from sqlalchemy.orm import Session
+
+from app.core.ai_cost import log_usage
+from app.core.deps import get_db
+from app.services.metering import check_and_consume, resolve_project_id
 
 logger = logging.getLogger(__name__)
 
@@ -184,6 +189,9 @@ async def _call_yemoda(body: ChatRequest) -> dict:
         logger.error("Anthropic API error: %s", exc)
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Error en el servicio de IA de Yemoda.")
 
+    # Distinguish the chat surfaces (general / code_review / ai_fix) so each can be costed separately.
+    log_usage(f"chat:{getattr(body, 'context_type', None) or 'general'}", model, response.usage.input_tokens, response.usage.output_tokens)
+
     return {
         "provider": "yemoda",
         "model": model,
@@ -213,5 +221,16 @@ def list_models():
     status_code=status.HTTP_200_OK,
 )
 @limiter.limit("30/minute")
-async def chat(request: Request, body: ChatRequest):
+async def chat(request: Request, body: ChatRequest, db: Session = Depends(get_db)):
+    # Quota: chat questions and AI-fix calls count against the project's monthly allowance.
+    # 'ai_fix' (resolve warnings) is the costliest, so it has its own category.
+    category = "aifix" if body.context_type == "ai_fix" else "chat"
+    project_id = resolve_project_id(db, body.context_data)
+    if project_id is not None:
+        allowed, used, quota = check_and_consume(db, project_id, category)
+        if not allowed:
+            raise HTTPException(
+                status_code=status.HTTP_402_PAYMENT_REQUIRED,
+                detail=f"AI quota reached for this project ({used}/{quota} {category} this month). Upgrade your plan or wait for the next cycle.",
+            )
     return await _call_yemoda(body)

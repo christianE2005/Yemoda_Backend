@@ -11,7 +11,10 @@ from slowapi.util import get_remote_address
 from sqlalchemy.orm import Session
 
 from app.core.database import SessionLocal
+from app.models.models import GithubPushEvent, PendingAiReview
 from app.services.agent_service import analyze_push
+from app.services import metering
+from app.services.metering import check_and_consume
 from app.services.github_service import fetch_file_content_at_ref, fetch_push_diff
 from app.services.task_service import (
     add_agent_comment,
@@ -87,7 +90,8 @@ def _analyze_and_apply(
     code_context: str,
     push_event,
     trigger: str = "push",
-) -> None:
+    allow_queue: bool = True,
+) -> bool:
     """Run Claude on the task tree and apply results (move to review, warnings, comment).
 
     analyze_tasks: tasks sent to the model (nested into a story tree for context).
@@ -95,6 +99,23 @@ def _analyze_and_apply(
                    analyze_tasks; on an on-demand parent review it is only the parent,
                    so already-reviewed subtasks are not touched again.
     """
+    # Quota: count this review against the project's monthly allowance. If exhausted, queue
+    # the push for later retry (automatic trigger) or skip (manual on-demand trigger).
+    allowed, used, q = check_and_consume(db, project.id_project, "reviews")
+    if not allowed:
+        will_queue = trigger == "push" and allow_queue and push_event is not None
+        logger.info(
+            "Review quota reached for project %s (%d/%d) — %s",
+            project.id_project, used, q, "queuing push" if will_queue else "skipping",
+        )
+        if will_queue:
+            try:
+                db.add(PendingAiReview(id_project=project.id_project, id_push=push_event.id_push, trigger=trigger))
+                db.commit()
+            except Exception:
+                db.rollback()
+        return False
+
     stories = build_story_tree(analyze_tasks)
 
     active_warnings_map: dict[int, list[dict]] = {}
@@ -123,7 +144,7 @@ def _analyze_and_apply(
         logger.info("Analysis complete for project %s (%s): %d matches", project.id_project, trigger, len(analysis.get("matches", [])))
     except Exception as exc:
         logger.error("Claude analysis failed: %s", exc)
-        return
+        return True
 
     review_column = get_review_column(db, project.id_project)
     review_column_id = review_column.id_column if review_column else None
@@ -165,6 +186,11 @@ def _analyze_and_apply(
 
         coverage = match.get("coverage", "partial")
         code_snippet = match.get("code_snippet")
+        # Safety net: cap the stored snippet to ~40 lines in case the model over-produces.
+        if isinstance(code_snippet, str):
+            _snippet_lines = code_snippet.splitlines()
+            if len(_snippet_lines) > 40:
+                code_snippet = "\n".join(_snippet_lines[:40]) + "\n… (truncated)"
         create_push_match(
             db,
             task_id=story_id,
@@ -194,6 +220,62 @@ def _analyze_and_apply(
 
         add_agent_comment(db, story_id, "\n".join(lines))
         logger.info("Story %s moved to Review and comment added (%s).", story_id, trigger)
+
+    return True
+
+
+def drain_pending_reviews(db: Session, project_id: int, max_items: int = 20) -> int:
+    """Re-run queued push reviews for a project while review quota remains.
+
+    Called lazily on the next push (e.g. after the monthly quota reset) and via the
+    internal /webhook/drain-pending/ endpoint (e.g. on plan upgrade). Reuses each push's
+    stored diff; file snapshots are not re-fetched. Returns how many were drained.
+    """
+    pendings = (
+        db.query(PendingAiReview)
+        .filter(PendingAiReview.id_project == project_id)
+        .order_by(PendingAiReview.created_at)
+        .limit(max_items)
+        .all()
+    )
+    drained = 0
+    for pending in pendings:
+        ok, _, _ = metering.has_quota(db, project_id, "reviews")
+        if not ok:
+            break  # no quota left — leave the rest queued
+        push = db.query(GithubPushEvent).filter(GithubPushEvent.id_push == pending.id_push).first()
+        project = get_project(db, project_id)
+        if project is None or push is None or not push.diff_text:
+            db.delete(pending)  # stale / unusable — drop it
+            db.commit()
+            continue
+        tasks = get_active_tasks(db, project_id)
+        blocked = get_blocked_parent_ids(tasks)
+        analyze_tasks = [t for t in tasks if t.id_task not in blocked]
+        if not analyze_tasks:
+            db.delete(pending)
+            db.commit()
+            continue
+        ran = _analyze_and_apply(
+            db,
+            project=project,
+            analyze_tasks=analyze_tasks,
+            lookup_tasks=analyze_tasks,
+            diff=push.diff_text,
+            code_context="",
+            push_event=push,
+            trigger="push",
+            allow_queue=False,  # never re-queue while draining
+        )
+        if ran:
+            db.delete(pending)
+            db.commit()
+            drained += 1
+        else:
+            break  # quota ran out mid-drain
+    if drained:
+        logger.info("Drained %d pending review(s) for project %s", drained, project_id)
+    return drained
 
 
 async def _run_push_analysis(payload: dict, db: Session) -> None:
@@ -327,6 +409,12 @@ async def _run_push_analysis(payload: dict, db: Session) -> None:
         trigger="push",
     )
 
+    # Drain any reviews that were queued earlier (e.g. now that the monthly quota reset).
+    try:
+        drain_pending_reviews(db, project.id_project)
+    except Exception as exc:
+        logger.warning("Pending-review drain failed for project %s: %s", project.id_project, exc)
+
 
 async def _process_push(payload: dict) -> None:
     db: Session = SessionLocal()
@@ -454,4 +542,37 @@ async def review_task_webhook(
     background_tasks.add_task(_process_review_task, int(project_id), int(task_id))
 
     return {"detail": "Revisión de tarea encolada. Analizando con IA en segundo plano...", "task_id": int(task_id)}
+
+
+@router.post("/drain-pending/")
+@limiter.limit("30/minute")
+async def drain_pending_webhook(
+    request: Request,
+    x_internal_token: str = Header(default=""),
+):
+    """Retry queued push reviews. Server-to-server: called by Django on plan upgrade or a
+    monthly-reset cron. Optional body {"project_id": N} limits it to one project."""
+    if not _WEBHOOK_SECRET or not hmac.compare_digest(x_internal_token, _WEBHOOK_SECRET):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token interno inválido.")
+
+    try:
+        payload = await request.json()
+    except json.JSONDecodeError:
+        payload = {}
+
+    total = 0
+    project_ids: list[int] = []
+    db: Session = SessionLocal()
+    try:
+        explicit = payload.get("project_id") if isinstance(payload, dict) else None
+        if explicit:
+            project_ids = [int(explicit)]
+        else:
+            project_ids = [row[0] for row in db.query(PendingAiReview.id_project).distinct().all()]
+        for pid in project_ids:
+            total += drain_pending_reviews(db, pid)
+    finally:
+        db.close()
+
+    return {"detail": "Drain complete.", "drained": total, "projects": len(project_ids)}
 
