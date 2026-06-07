@@ -15,12 +15,14 @@ from slowapi.util import get_remote_address
 from sqlalchemy.orm import Session
 
 from app.core.ai_cost import log_usage
-from app.core.deps import get_db
+from app.core.deps import get_db, require_internal_token
 from app.services.metering import check_and_consume, resolve_project_id
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/chat", tags=["chat"])
+# Server-to-server only: the Django backend proxies chat here and attaches X-Internal-Token.
+# This prevents anonymous internet callers from spending the owner's Anthropic budget directly.
+router = APIRouter(prefix="/chat", tags=["chat"], dependencies=[Depends(require_internal_token)])
 limiter = Limiter(key_func=get_remote_address)
 
 # Anthropic models available server-side

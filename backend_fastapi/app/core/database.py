@@ -32,6 +32,20 @@ engine_url = URL.create(
     query=_query,
 )
 
-engine = create_engine(engine_url, future=True)
+# pool_pre_ping drops dead connections (avoids "server closed the connection" after idle).
+# For Postgres we also size the pool and cap how long a checkout waits for the DB, so a burst of
+# concurrent reviews can't silently exhaust the default 5+10 pool. SQLite (tests) ignores pooling
+# args, so they are only applied for real (non-sqlite) engines.
+_engine_kwargs: dict = {"future": True, "pool_pre_ping": True}
+if not engine_url.drivername.startswith("sqlite"):
+    _engine_kwargs.update(
+        pool_recycle=1800,
+        pool_size=10,
+        max_overflow=20,
+        pool_timeout=30,
+        connect_args={"connect_timeout": 5},
+    )
+
+engine = create_engine(engine_url, **_engine_kwargs)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
 Base = declarative_base()

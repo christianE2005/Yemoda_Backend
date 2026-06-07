@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import hmac
 import json
@@ -416,10 +417,14 @@ async def _run_push_analysis(payload: dict, db: Session) -> None:
         logger.warning("Pending-review drain failed for project %s: %s", project.id_project, exc)
 
 
-async def _process_push(payload: dict) -> None:
+def _process_push(payload: dict) -> None:
+    # IMPORTANT: this is a plain `def`, so Starlette runs it in a threadpool (off the event loop).
+    # The push analysis calls the BLOCKING Anthropic SDK + synchronous DB I/O; running it on the
+    # main event loop would freeze the entire FastAPI process for the multi-second model call.
+    # asyncio.run gives the async file-fetch steps their own loop inside this worker thread.
     db: Session = SessionLocal()
     try:
-        await _run_push_analysis(payload, db)
+        asyncio.run(_run_push_analysis(payload, db))
     finally:
         db.close()
 

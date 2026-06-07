@@ -17,7 +17,7 @@ import logging
 import os
 from datetime import datetime, timezone
 
-from sqlalchemy import func
+from sqlalchemy import func, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -108,19 +108,53 @@ def has_quota(db: Session, project_id: int, category: str) -> tuple[bool, int, i
     return True, used, q
 
 
-def consume(db: Session, project_id: int, category: str) -> int:
-    """Record one used call of this category. Returns the new used count."""
-    row = _get_or_create_usage(db, project_id, current_period())
+def _atomic_consume(
+    db: Session, project_id: int, category: str, period: str, quota_limit: int | None = None
+) -> int | None:
+    """Atomically increment the period counter in a single SQL statement.
+
+    The increment runs as `UPDATE ... SET col = col + 1 [AND col < :limit] RETURNING col`, so
+    Postgres row-locks serialize concurrent callers — no lost updates, no TOCTOU overshoot. When
+    `quota_limit` is given, the row matches only while still under quota; a 0-row result (None)
+    means the quota is exhausted. `category` maps through the fixed `_COLUMN` whitelist, so the
+    inlined column name is never user-controlled.
+    """
     col = _COLUMN[category]
-    setattr(row, col, (getattr(row, col) or 0) + 1)
+    _get_or_create_usage(db, project_id, period)  # ensure the row exists so the UPDATE can match
+    cond = f" AND {col} < :limit" if quota_limit is not None else ""
+    stmt = text(
+        f"UPDATE project_ai_usage SET {col} = {col} + 1, updated_at = CURRENT_TIMESTAMP "
+        f"WHERE id_project = :pid AND period = :period{cond} "
+        f"RETURNING {col}"
+    )
+    params: dict = {"pid": project_id, "period": period}
+    if quota_limit is not None:
+        params["limit"] = quota_limit
+    row = db.execute(stmt, params).first()
     db.commit()
-    return getattr(row, col)
+    return row[0] if row else None
+
+
+def consume(db: Session, project_id: int, category: str) -> int:
+    """Record one used call of this category (unconditional). Returns the new used count."""
+    new_used = _atomic_consume(db, project_id, category, current_period())
+    return new_used if new_used is not None else 0
 
 
 def check_and_consume(db: Session, project_id: int, category: str) -> tuple[bool, int, int]:
-    """If under quota (or enforcement off), record the call and allow it. Returns (allowed, used, quota)."""
-    allowed, used, q = has_quota(db, project_id, category)
-    if not allowed:
+    """Atomically gate AND record one call. Returns (allowed, used, quota).
+
+    The check and the increment are a single atomic SQL statement, so two concurrent calls can
+    never both pass at the last available unit.
+    """
+    period = current_period()  # computed once so a month rollover can't split check vs increment
+    q = quota(db, project_id, category)
+    if not ENFORCE:
+        new_used = _atomic_consume(db, project_id, category, period)
+        return True, (new_used if new_used is not None else 0), q
+    new_used = _atomic_consume(db, project_id, category, period, quota_limit=q)
+    if new_used is None:
+        row = db.query(ProjectAiUsage).filter_by(id_project=project_id, period=period).first()
+        used = getattr(row, _COLUMN[category]) if row else q
         return False, used, q
-    new_used = consume(db, project_id, category)
     return True, new_used, q

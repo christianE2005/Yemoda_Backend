@@ -84,6 +84,10 @@ class ProjectSerializer(serializers.ModelSerializer):
     class Meta:
         model = Project
         fields = "__all__"
+        # `plan` and `stripe_subscription_id` are entitlement/billing fields that may ONLY be
+        # changed server-side by the Stripe webhook — never by a client request body (otherwise
+        # any user could POST plan="pro" and get paid AI quotas for free).
+        read_only_fields = ["id_project", "plan", "stripe_subscription_id", "created_at"]
 
 
 class ProjectRepoSerializer(serializers.ModelSerializer):

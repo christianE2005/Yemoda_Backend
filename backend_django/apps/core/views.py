@@ -139,15 +139,25 @@ def _issue_tokens(user: UserAccount) -> dict:
     }
 
 
+_VALID_SAMESITE = {"lax": "Lax", "strict": "Strict", "none": "None"}
+
+
 def _set_refresh_cookie(response, refresh_token: str):
-    """Attach the refresh token as an HttpOnly cookie (kept out of JS-readable storage)."""
+    """Attach the refresh token as an HttpOnly cookie (kept out of JS-readable storage).
+
+    SameSite is normalized to a valid value so a misconfigured REFRESH_COOKIE_SAMESITE env var
+    can never make Django's set_cookie raise ValueError (which would 500 every login). SameSite=None
+    additionally requires Secure, so we force it on in that case.
+    """
+    samesite = _VALID_SAMESITE.get((settings.REFRESH_COOKIE_SAMESITE or "").strip().lower(), "Lax")
+    secure = bool(settings.REFRESH_COOKIE_SECURE) or samesite == "None"
     response.set_cookie(
         settings.REFRESH_COOKIE_NAME,
         refresh_token,
         max_age=settings.JWT_REFRESH_EXPIRE_MINUTES * 60,
         httponly=True,
-        secure=settings.REFRESH_COOKIE_SECURE,
-        samesite=settings.REFRESH_COOKIE_SAMESITE,
+        secure=secure,
+        samesite=samesite,
         domain=settings.REFRESH_COOKIE_DOMAIN,
         path=settings.REFRESH_COOKIE_PATH,
     )
@@ -1300,13 +1310,23 @@ class TaskAssignmentViewSet(viewsets.ModelViewSet):
         user_project_ids = Project.objects.filter(
             Q(members__user=user) | Q(created_by=user)
         ).values_list('id_project', flat=True)
-        qs = TaskAssignment.objects.filter(task__project_id__in=user_project_ids)
+        # select_related avoids the N+1 the serializer would otherwise trigger reading
+        # assigned_to.* and task.title per row.
+        qs = (
+            TaskAssignment.objects
+            .filter(task__project_id__in=user_project_ids)
+            .select_related('task', 'assigned_to')
+        )
         task_id = self.request.query_params.get('task')
         user_id_param = self.request.query_params.get('user')
+        project_id_param = self.request.query_params.get('project')
         if task_id is not None:
             qs = qs.filter(task_id=task_id)
         if user_id_param is not None:
             qs = qs.filter(assigned_to_id=user_id_param)
+        # Lets the frontend scope to one project instead of fetching the global table.
+        if project_id_param is not None:
+            qs = qs.filter(task__project_id=project_id_param)
         return qs
 
     def perform_create(self, serializer):
@@ -2095,41 +2115,48 @@ class GithubAppLinkInstallationView(APIView):
         serializer = GithubAppLinkInstallationSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         installation_id = serializer.validated_data["installation_id"]
-
-        # Always link the installation to the authenticated caller — never a body-supplied
-        # user_id (which would let an attacker hijack installations onto other accounts).
         user = request.user
 
-        try:
-            installation_response = requests.get(
-                f"{GITHUB_API_URL}/app/installations/{installation_id}",
-                headers=_github_app_headers(),
-                timeout=20,
-            )
-        except ValueError as exc:
-            return Response({"detail": str(exc)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-        if installation_response.status_code >= 400:
+        # Only link installations the caller actually has access to. We verify against the user's
+        # OWN GitHub token (GET /user/installations) — NOT a body-supplied id queried with the App
+        # JWT — because installation ids are small/sequential/enumerable, and the old code would
+        # overwrite the row's owner, letting any user hijack another org's installation (and pivot
+        # to its repos via the installation token).
+        github_connection = GithubConnection.objects.filter(user=user).first()
+        token = _get_valid_github_token(github_connection) if github_connection else None
+        if not token:
             return Response(
-                {"detail": "No se pudo consultar la instalacion."},
+                {"detail": "Conecta tu cuenta de GitHub antes de vincular una instalación."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        data = installation_response.json()
-        account = data.get("account") or {}
-        install, _ = GithubAppInstallation.objects.update_or_create(
-            installation_id=installation_id,
-            defaults={
-                "account_login": account.get("login", ""),
-                "account_type": account.get("type"),
-                "user": user,
-            },
-        )
+        try:
+            installs_response = requests.get(
+                f"{GITHUB_API_URL}/user/installations",
+                headers=_github_headers(token),
+                timeout=20,
+            )
+        except requests.RequestException:
+            return Response({"detail": "No se pudo consultar las instalaciones."}, status=status.HTTP_502_BAD_GATEWAY)
+
+        accessible = {
+            i.get("id") for i in (installs_response.json().get("installations", []) if installs_response.status_code < 400 else [])
+        }
+        if installation_id not in accessible:
+            return Response(
+                {"detail": "No tienes acceso a esta instalación de GitHub App."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        # Safe to persist: _sync_user_installations links only the user's real installations and
+        # never steals an org installation already owned by another member.
+        _sync_user_installations(user, token)
+        install = GithubAppInstallation.objects.filter(installation_id=installation_id).first()
         return Response(
             {
-                "installation_id": install.installation_id,
-                "account_login": install.account_login,
-                "account_type": install.account_type,
+                "installation_id": installation_id,
+                "account_login": install.account_login if install else "",
+                "account_type": install.account_type if install else None,
                 "user_id": user.id_user,
             },
             status=status.HTTP_200_OK,
@@ -2176,6 +2203,17 @@ class GithubCreateRepoView(APIView):
         # let an attacker create repos with another user's GitHub token / org installation).
         user = request.user
 
+        # Verify project access BEFORE creating anything on GitHub (avoid orphan repos and
+        # cross-tenant repo creation by users with no rights to the target project).
+        project_obj = Project.objects.filter(
+            Q(id_project=data["project_id"]) & (Q(members__user=user) | Q(created_by=user))
+        ).distinct().first()
+        if not project_obj:
+            return Response(
+                {"detail": "Proyecto no encontrado o no tienes acceso."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
         owner_type = data["owner_type"]
         owner = data.get("owner") or ""
         auth_headers = None
@@ -2196,24 +2234,17 @@ class GithubCreateRepoView(APIView):
         else:
             if not owner:
                 return Response({"detail": "Para owner_type=org, owner es requerido."}, status=status.HTTP_400_BAD_REQUEST)
-            installation_id = data.get("installation_id")
-            if not installation_id:
-                linked = GithubAppInstallation.objects.filter(user=user, account_login=owner).first()
-                installation_id = linked.installation_id if linked else None
-            if isinstance(installation_id, int) and installation_id > 0:
-                resolved_installation_id = installation_id
-            else:
-                resolved_installation_id = None
-            if not resolved_installation_id:
-                try:
-                    resolved_installation_id = _resolve_org_installation_for_user(user=user, org_login=owner)
-                except ValueError as exc:
-                    return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-                except Exception as exc:
-                    return Response(
-                        {"detail": f"Error de configuración GitHub App: {exc}"},
-                        status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    )
+            # Always resolve the org installation via the user's OWN active org membership — never
+            # trust a client-supplied installation_id (ids are enumerable → cross-org repo creation).
+            try:
+                resolved_installation_id = _resolve_org_installation_for_user(user=user, org_login=owner)
+            except ValueError as exc:
+                return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+            except Exception as exc:
+                return Response(
+                    {"detail": f"Error de configuración GitHub App: {exc}"},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                )
             try:
                 token = _installation_access_token(resolved_installation_id)
             except ValueError as exc:
@@ -2247,16 +2278,7 @@ class GithubCreateRepoView(APIView):
 
         repo = repo_response.json()
 
-        project_id = data["project_id"]
-        project_obj = Project.objects.filter(
-            Q(id_project=project_id) & (Q(members__user=user) | Q(created_by=user))
-        ).distinct().first()
-        if not project_obj:
-            return Response(
-                {"detail": "Proyecto no encontrado o no tienes acceso."},
-                status=status.HTTP_404_NOT_FOUND,
-            )
-
+        project_id = data["project_id"]  # access already validated at the top of post()
         Project.objects.filter(id_project=project_id).update(
             github_repo_full_name=repo.get("full_name")
         )
@@ -3650,10 +3672,14 @@ class CreateCheckoutSessionView(APIView):
         seats = max(ProjectMember.objects.filter(project=project).count(), 1)
 
         try:
+            # Carry the project id so the success page can confirm THIS project's plan flipped to
+            # Pro (per-project billing never sets a user-level premium flag).
+            _sep = "&" if "?" in settings.STRIPE_SUCCESS_URL else "?"
+            success_url = f"{settings.STRIPE_SUCCESS_URL}{_sep}project={project.id_project}"
             session = stripe.checkout.Session.create(
                 line_items=[{"price": price_id, "quantity": seats}],
                 mode="subscription",
-                success_url=settings.STRIPE_SUCCESS_URL,
+                success_url=success_url,
                 cancel_url=settings.STRIPE_CANCEL_URL,
                 customer_email=user.email,
                 metadata={"user_id": str(user.id_user), "project_id": str(project.id_project), "plan": plan},
@@ -4054,13 +4080,12 @@ class GithubChatProxyView(APIView):
         headers = {
             "Content-Type": "application/json",
             "Accept": request.headers.get("Accept", "application/json"),
+            # Server-to-server trust: the FastAPI chat endpoint requires this internal token, so it
+            # can no longer be reached anonymously from the internet. The end user is already
+            # authenticated to reach THIS proxy (IsAuthenticated); we do NOT relay the client's
+            # Authorization header as a trust signal to the AI service.
+            "X-Internal-Token": settings.GITHUB_APP_WEBHOOK_SECRET or "",
         }
-
-        # Preserve the caller's Authorization header if present so the upstream can
-        # keep using the same user identity for audit/logging if needed.
-        auth_header = request.headers.get("Authorization", "").strip()
-        if auth_header:
-            headers["Authorization"] = auth_header
 
         stream = bool(payload.get("stream")) if isinstance(payload, dict) else False
 
