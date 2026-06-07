@@ -127,6 +127,21 @@ class TaskPriority(Base):
     level: Mapped[int] = mapped_column(Integer, nullable=False)
 
 
+class Sprint(Base):
+    __tablename__ = "sprint"
+
+    id_sprint: Mapped[int] = mapped_column(BigInteger, primary_key=True, index=True)
+    id_project: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("project.id_project", ondelete="CASCADE"),
+        nullable=False,
+    )
+    name: Mapped[str] = mapped_column(String(150), nullable=False)
+    start_date: Mapped[Date | None] = mapped_column(Date, nullable=True)
+    end_date: Mapped[Date | None] = mapped_column(Date, nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="planned")
+
+
 class Task(Base):
     __tablename__ = "task"
 
@@ -296,6 +311,28 @@ class PendingAiReview(Base):
         nullable=False,
     )
     trigger: Mapped[str] = mapped_column(String(20), nullable=False, default="push")
+    created_at: Mapped[DateTime] = mapped_column(DateTime, server_default=func.now())
+
+
+class Hackathon(Base):
+    __tablename__ = "hackathon"
+
+    id_hackathon: Mapped[int] = mapped_column(BigInteger, primary_key=True, index=True)
+    name: Mapped[str] = mapped_column(String(150), nullable=False)
+    # Django field `created_by` maps to db_column "id_user".
+    id_user: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("user_account.id_user", ondelete="SET NULL"),
+        nullable=True,
+    )
+    rubric: Mapped[dict] = mapped_column(
+        JSON().with_variant(JSONB, "postgresql"),
+        nullable=False,
+        default=dict,
+    )
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="open")
+    processing_mode: Mapped[str] = mapped_column(String(10), nullable=False, default="normal")
+    expected_teams: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[DateTime] = mapped_column(DateTime, server_default=func.now())
 
 
