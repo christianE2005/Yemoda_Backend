@@ -864,6 +864,75 @@ class StripePayment(models.Model):
         ordering = ["-created_at"]
 
 
+class Hackathon(models.Model):
+    """A hackathon a judge (owner) runs: holds the scoring rubric and groups submissions."""
+    STATUS_OPEN = "open"
+    STATUS_CLOSED = "closed"
+    STATUS_CHOICES = [
+        (STATUS_OPEN, "Open"),
+        (STATUS_CLOSED, "Closed"),
+    ]
+
+    id_hackathon = models.BigAutoField(primary_key=True)
+    name = models.CharField(max_length=150)
+    created_by = models.ForeignKey(
+        UserAccount,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        db_column="id_user",
+        related_name="hackathons_created",
+    )
+    # category -> integer weight chosen by the judge (weight 0 means "ignore in the overall").
+    rubric = models.JSONField(default=dict)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_OPEN)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "hackathon"
+        ordering = ["-created_at"]
+
+
+class HackathonSubmission(models.Model):
+    """A team's repo submission to a hackathon; scored asynchronously by the FastAPI auditor."""
+    STATUS_PENDING = "pending"
+    STATUS_RUNNING = "running"
+    STATUS_DONE = "done"
+    STATUS_FAILED = "failed"
+    STATUS_CHOICES = [
+        (STATUS_PENDING, "Pending"),
+        (STATUS_RUNNING, "Running"),
+        (STATUS_DONE, "Done"),
+        (STATUS_FAILED, "Failed"),
+    ]
+
+    id_submission = models.BigAutoField(primary_key=True)
+    hackathon = models.ForeignKey(
+        Hackathon,
+        on_delete=models.CASCADE,
+        db_column="id_hackathon",
+        related_name="submissions",
+    )
+    team_name = models.CharField(max_length=150)
+    repo_url = models.CharField(max_length=500)
+    ref = models.CharField(max_length=255, default="main")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_PENDING)
+    # 0..100 weighted overall, computed by the auditor.
+    score = models.IntegerField(null=True, blank=True)
+    # {category: {score: 0..100, weight: int}}
+    score_breakdown = models.JSONField(null=True, blank=True)
+    # [{category, severity, title, file, description}]
+    findings = models.JSONField(null=True, blank=True)
+    summary = models.TextField(null=True, blank=True)
+    error = models.TextField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    analyzed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "hackathon_submission"
+        ordering = ["-created_at"]
+
+
 class EmailVerificationToken(models.Model):
     id = models.BigAutoField(primary_key=True)
     user = models.ForeignKey(

@@ -8,7 +8,7 @@ from slowapi.middleware import SlowAPIMiddleware
 from slowapi.util import get_remote_address
 
 from app.core.database import Base, engine
-from app.routers import predictions, webhook, chat
+from app.routers import audit, predictions, webhook, chat
 
 logging.basicConfig(
     stream=sys.stdout,
@@ -34,6 +34,7 @@ app.include_router(webhook.router)
 app.include_router(predictions.router)
 app.include_router(chat.router)
 app.include_router(chat.router, prefix="/api")
+app.include_router(audit.router, prefix="/api")
 
 
 @app.on_event("startup")

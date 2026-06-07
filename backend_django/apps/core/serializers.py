@@ -1,3 +1,5 @@
+import re
+
 from rest_framework import serializers
 from django.contrib.auth.hashers import make_password
 from drf_spectacular.utils import extend_schema_field
@@ -8,6 +10,8 @@ from .models import (
     BoardColumn,
     GithubPushEvent,
     GithubRepo,
+    Hackathon,
+    HackathonSubmission,
     Milestone,
     Project,
     ProjectMember,
@@ -26,6 +30,24 @@ from .models import (
     TaskWarning,
     UserAccount,
 )
+
+# Fixed scoring categories for the Hackathon Robustness Score and the default rubric weights.
+HACKATHON_CATEGORIES = (
+    "security",
+    "performance",
+    "robustness",
+    "correctness",
+    "maintainability",
+    "tdd",
+)
+DEFAULT_HACKATHON_RUBRIC = {
+    "security": 30,
+    "performance": 10,
+    "robustness": 25,
+    "correctness": 20,
+    "maintainability": 15,
+    "tdd": 0,
+}
 
 
 class UserAccountSerializer(serializers.ModelSerializer):
@@ -423,6 +445,101 @@ class GithubCreateRepoSerializer(serializers.Serializer):
 class GithubAppLinkInstallationSerializer(serializers.Serializer):
     user_id = serializers.IntegerField(min_value=1)
     installation_id = serializers.IntegerField(min_value=1)
+
+
+def _validate_hackathon_rubric(value):
+    """Normalize a rubric to {category: non-negative int} over the 6 known categories.
+
+    Accepts a dict of known category keys -> non-negative ints; rejects unknown keys and
+    negative/non-integer weights; fills missing categories from the default rubric.
+    """
+    if value is None:
+        return dict(DEFAULT_HACKATHON_RUBRIC)
+    if not isinstance(value, dict):
+        raise serializers.ValidationError("El rubric debe ser un objeto {categoria: peso}.")
+
+    unknown = set(value.keys()) - set(HACKATHON_CATEGORIES)
+    if unknown:
+        raise serializers.ValidationError(
+            f"Categorías desconocidas en el rubric: {', '.join(sorted(unknown))}. "
+            f"Válidas: {', '.join(HACKATHON_CATEGORIES)}."
+        )
+
+    normalized = dict(DEFAULT_HACKATHON_RUBRIC)
+    for category, weight in value.items():
+        # Reject bools (a subclass of int) and non-integers; weights must be >= 0.
+        if isinstance(weight, bool) or not isinstance(weight, int):
+            raise serializers.ValidationError(
+                {category: "El peso debe ser un entero no negativo."}
+            )
+        if weight < 0:
+            raise serializers.ValidationError(
+                {category: "El peso no puede ser negativo."}
+            )
+        normalized[category] = weight
+    return normalized
+
+
+class HackathonSerializer(serializers.ModelSerializer):
+    created_by = serializers.PrimaryKeyRelatedField(read_only=True)
+    rubric = serializers.JSONField(required=False)
+
+    class Meta:
+        model = Hackathon
+        fields = ["id_hackathon", "name", "created_by", "rubric", "status", "created_at"]
+        read_only_fields = ["id_hackathon", "created_by", "status", "created_at"]
+
+    def validate_rubric(self, value):
+        return _validate_hackathon_rubric(value)
+
+    def create(self, validated_data):
+        # Always persist a full, normalized rubric (defaults applied) even when omitted.
+        if "rubric" not in validated_data:
+            validated_data["rubric"] = dict(DEFAULT_HACKATHON_RUBRIC)
+        return super().create(validated_data)
+
+
+class HackathonSubmissionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = HackathonSubmission
+        fields = [
+            "id_submission",
+            "hackathon",
+            "team_name",
+            "repo_url",
+            "ref",
+            "status",
+            "score",
+            "score_breakdown",
+            "findings",
+            "summary",
+            "error",
+            "created_at",
+            "analyzed_at",
+        ]
+        # Only team_name/repo_url/ref are client-writable on create; everything else (including
+        # the parent hackathon, which the view sets) is populated server-side / by the auditor.
+        read_only_fields = [
+            "id_submission",
+            "hackathon",
+            "status",
+            "score",
+            "score_breakdown",
+            "findings",
+            "summary",
+            "error",
+            "created_at",
+            "analyzed_at",
+        ]
+
+    def validate_repo_url(self, value):
+        url = (value or "").strip()
+        # Must be a public GitHub repo URL: https://github.com/<owner>/<repo>
+        if not re.match(r"^https://github\.com/[^/\s]+/[^/\s]+/?$", url):
+            raise serializers.ValidationError(
+                "repo_url debe ser una URL https://github.com/owner/repo válida."
+            )
+        return url
 
 
 class TaskPushMatchSerializer(serializers.ModelSerializer):

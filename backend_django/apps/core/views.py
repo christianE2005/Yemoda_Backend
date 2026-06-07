@@ -13,7 +13,7 @@ from django.conf import settings
 from django.contrib.auth.hashers import check_password, make_password
 from django.http import Http404, HttpResponse, HttpResponseRedirect, JsonResponse, StreamingHttpResponse
 from django.db import DatabaseError
-from django.db.models import Q
+from django.db.models import F, Q
 from django.utils import timezone as django_timezone
 from drf_spectacular.utils import extend_schema
 from rest_framework import status, viewsets
@@ -33,6 +33,8 @@ from .models import (
     GithubConnection,
     GithubPushEvent,
     GithubRepo,
+    Hackathon,
+    HackathonSubmission,
     Milestone,
     Project,
     ProjectAiUsage,
@@ -64,6 +66,8 @@ from .serializers import (
     GithubOauthCallbackSerializer,
     GithubPushEventSerializer,
     GithubRepoSerializer,
+    HackathonSerializer,
+    HackathonSubmissionSerializer,
     LoginSerializer,
     MilestoneSerializer,
     ProjectMemberSerializer,
@@ -3650,6 +3654,36 @@ def _drain_pending_reviews_async(project_id: int) -> None:
         pass
 
 
+def _trigger_hackathon_audit_async(submission_id: int, repo_url: str, ref: str, rubric: dict) -> None:
+    """Best-effort: ask the FastAPI auditor to score a submission.
+
+    Returns 202 immediately; FastAPI runs the analysis in a BackgroundTask and writes the
+    result (status/score/score_breakdown/findings/summary/error/analyzed_at) DIRECTLY into the
+    hackathon_submission row on the shared DB. No callback to Django, so failures here are
+    swallowed — the submission simply stays 'pending' until retried.
+    """
+    base = (settings.FASTAPI_CHAT_BASE_URL or "").rstrip("/")
+    if not base:
+        return
+    try:
+        requests.post(
+            f"{base}/api/audit/submission/",
+            json={
+                "submission_id": submission_id,
+                "repo_url": repo_url,
+                "ref": ref,
+                "rubric": rubric,
+            },
+            headers={
+                "Content-Type": "application/json",
+                "X-Internal-Token": settings.FASTAPI_INTERNAL_TOKEN or "",
+            },
+            timeout=5,
+        )
+    except requests.RequestException:
+        pass
+
+
 class CreateCheckoutSessionView(APIView):
     def post(self, request):
         import stripe
@@ -4425,4 +4459,90 @@ class ProjectRepoDetailView(APIView):
 
         repo.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class HackathonViewSet(viewsets.ModelViewSet):
+    """Owner-scoped hackathons: the creator (created_by) is the judge.
+
+    A hackathon and its submissions are only ever visible/editable by their creator (no
+    project RBAC involved) — anything not created by the caller returns 404.
+    """
+    queryset = Hackathon.objects.all()
+    serializer_class = HackathonSerializer
+
+    def get_queryset(self):
+        # Owner-scoped: only the judge who created the hackathon can see it.
+        return Hackathon.objects.filter(created_by=self.request.user).order_by("-created_at")
+
+    def perform_create(self, serializer):
+        serializer.save(created_by=self.request.user)
+
+    def _get_owned_hackathon(self, pk):
+        """Fetch a hackathon owned by the caller, or 404 (never reveal others' hackathons)."""
+        hackathon = Hackathon.objects.filter(pk=pk, created_by=self.request.user).first()
+        if hackathon is None:
+            raise Http404("Hackathon no encontrado.")
+        return hackathon
+
+    @extend_schema(
+        request=HackathonSubmissionSerializer,
+        responses={201: HackathonSubmissionSerializer},
+        tags=["hackathons"],
+        summary="Añadir una submission a un hackathon (propio)",
+    )
+    @action(detail=True, methods=["post"], url_path="submissions")
+    def add_submission(self, request, pk=None):
+        """Create a submission under an owned hackathon and trigger the FastAPI audit."""
+        hackathon = self._get_owned_hackathon(pk)
+        serializer = HackathonSubmissionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        submission = serializer.save(
+            hackathon=hackathon,
+            status=HackathonSubmission.STATUS_PENDING,
+        )
+        # Fire-and-forget: FastAPI scores asynchronously and writes back to the shared DB.
+        _trigger_hackathon_audit_async(
+            submission_id=submission.id_submission,
+            repo_url=submission.repo_url,
+            ref=submission.ref,
+            rubric=hackathon.rubric or {},
+        )
+        return Response(
+            HackathonSubmissionSerializer(submission).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+    @extend_schema(
+        responses={200: HackathonSubmissionSerializer(many=True)},
+        tags=["hackathons"],
+        summary="Leaderboard: submissions ordenadas por score (propio)",
+    )
+    @action(detail=True, methods=["get"], url_path="leaderboard")
+    def leaderboard(self, request, pk=None):
+        """Submissions of an owned hackathon ordered by score DESC (nulls last)."""
+        hackathon = self._get_owned_hackathon(pk)
+        submissions = HackathonSubmission.objects.filter(hackathon=hackathon).order_by(
+            F("score").desc(nulls_last=True), "-created_at"
+        )
+        return Response(HackathonSubmissionSerializer(submissions, many=True).data)
+
+    @extend_schema(
+        responses={200: HackathonSubmissionSerializer},
+        tags=["hackathons"],
+        summary="Detalle de una submission (propio)",
+    )
+    @action(
+        detail=True,
+        methods=["get"],
+        url_path=r"submissions/(?P<submission_id>[^/.]+)",
+    )
+    def submission_detail(self, request, pk=None, submission_id=None):
+        """Score/breakdown/findings/status for one submission of an owned hackathon."""
+        hackathon = self._get_owned_hackathon(pk)
+        submission = HackathonSubmission.objects.filter(
+            pk=submission_id, hackathon=hackathon
+        ).first()
+        if submission is None:
+            raise Http404("Submission no encontrada.")
+        return Response(HackathonSubmissionSerializer(submission).data)
 

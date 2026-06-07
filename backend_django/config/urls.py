@@ -24,6 +24,7 @@ from apps.core.views import (
     GithubRepoContentsView,
     GithubRepoBranchesView,
     GithubCommitFilesView,
+    HackathonViewSet,
     HealthCheckView,
     LoginView,
     LogoutView,
@@ -83,6 +84,7 @@ router.register(r"task-assignments", TaskAssignmentViewSet)
 router.register(r"task-comments", TaskCommentViewSet)
 router.register(r"task-ai-review-results", TaskAIReviewResultViewSet)
 router.register(r"activity-logs", ActivityLogViewSet)
+router.register(r"hackathons", HackathonViewSet)
 
 urlpatterns = [
     path("admin/", admin.site.urls),

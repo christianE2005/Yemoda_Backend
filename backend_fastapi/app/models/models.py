@@ -297,3 +297,32 @@ class PendingAiReview(Base):
     )
     trigger: Mapped[str] = mapped_column(String(20), nullable=False, default="push")
     created_at: Mapped[DateTime] = mapped_column(DateTime, server_default=func.now())
+
+
+class HackathonSubmission(Base):
+    __tablename__ = "hackathon_submission"
+
+    id_submission: Mapped[int] = mapped_column(BigInteger, primary_key=True, index=True)
+    id_hackathon: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("hackathon.id_hackathon", ondelete="CASCADE"),
+        nullable=False,
+    )
+    team_name: Mapped[str] = mapped_column(String(150), nullable=False)
+    repo_url: Mapped[str] = mapped_column(String(500), nullable=False)
+    ref: Mapped[str] = mapped_column(String(255), nullable=False, default="main")
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")  # pending|running|done|failed
+    score: Mapped[int | None] = mapped_column(Integer, nullable=True)  # 0..100 weighted overall
+    # Match Django's JSONB column type on Postgres while keeping cross-DB tests working.
+    score_breakdown: Mapped[dict | None] = mapped_column(
+        JSON().with_variant(JSONB, "postgresql"),
+        nullable=True,
+    )  # {category: {score:0..100, weight:int}}
+    findings: Mapped[list | None] = mapped_column(
+        JSON().with_variant(JSONB, "postgresql"),
+        nullable=True,
+    )  # [{category,severity,title,file,description}]
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[DateTime] = mapped_column(DateTime, server_default=func.now())
+    analyzed_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
