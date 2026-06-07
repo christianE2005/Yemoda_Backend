@@ -248,6 +248,11 @@ AI_FREE_QUOTA_AIFIX = int(os.getenv("AI_FREE_QUOTA_AIFIX", "1"))
 AI_FREE_QUOTA_CHAT = int(os.getenv("AI_FREE_QUOTA_CHAT", "10"))
 AI_METERING_ENFORCE = os.getenv("AI_METERING_ENFORCE", "true").lower() == "true"
 
+# Hackathon pricing: charged per team. Batch mode applies a discount multiplier
+# (cheaper async Anthropic Message Batches). See serializers/views for the price formula.
+HACKATHON_PRICE_PER_TEAM = float(os.getenv("HACKATHON_PRICE_PER_TEAM", "1.50"))   # charge per team, normal mode
+HACKATHON_BATCH_DISCOUNT = float(os.getenv("HACKATHON_BATCH_DISCOUNT", "0.5"))    # batch multiplier (-> $0.75/team)
+
 # Stripe
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")

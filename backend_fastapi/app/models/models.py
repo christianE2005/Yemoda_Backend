@@ -311,7 +311,7 @@ class HackathonSubmission(Base):
     team_name: Mapped[str] = mapped_column(String(150), nullable=False)
     repo_url: Mapped[str] = mapped_column(String(500), nullable=False)
     ref: Mapped[str] = mapped_column(String(255), nullable=False, default="main")
-    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")  # pending|running|done|failed
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")  # pending|running|batch_pending|done|failed
     score: Mapped[int | None] = mapped_column(Integer, nullable=True)  # 0..100 weighted overall
     # Match Django's JSONB column type on Postgres while keeping cross-DB tests working.
     score_breakdown: Mapped[dict | None] = mapped_column(
@@ -324,5 +324,12 @@ class HackathonSubmission(Base):
     )  # [{category,severity,title,file,description}]
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Batch mode (Anthropic Message Batches): id + per-chunk metadata used to reduce results later.
+    batch_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # {n_chunks:int, chunks:[{idx,char_len}], rubric:{cat:int}}
+    batch_meta: Mapped[dict | None] = mapped_column(
+        JSON().with_variant(JSONB, "postgresql"),
+        nullable=True,
+    )
     created_at: Mapped[DateTime] = mapped_column(DateTime, server_default=func.now())
     analyzed_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)

@@ -873,6 +873,13 @@ class Hackathon(models.Model):
         (STATUS_CLOSED, "Closed"),
     ]
 
+    MODE_NORMAL = "normal"
+    MODE_BATCH = "batch"
+    PROCESSING_MODE_CHOICES = [
+        (MODE_NORMAL, "Normal"),
+        (MODE_BATCH, "Batch"),
+    ]
+
     id_hackathon = models.BigAutoField(primary_key=True)
     name = models.CharField(max_length=150)
     created_by = models.ForeignKey(
@@ -886,6 +893,14 @@ class Hackathon(models.Model):
     # category -> integer weight chosen by the judge (weight 0 means "ignore in the overall").
     rubric = models.JSONField(default=dict)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_OPEN)
+    # 'normal' scores each submission live; 'batch' uses Anthropic Message Batches (cheaper, async).
+    processing_mode = models.CharField(
+        max_length=10,
+        choices=PROCESSING_MODE_CHOICES,
+        default=MODE_NORMAL,
+    )
+    # Number of teams the judge expects, used only for the price quote.
+    expected_teams = models.IntegerField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -899,11 +914,14 @@ class HackathonSubmission(models.Model):
     STATUS_RUNNING = "running"
     STATUS_DONE = "done"
     STATUS_FAILED = "failed"
+    # Batch mode: submitted to an Anthropic Message Batch, awaiting its result.
+    STATUS_BATCH_PENDING = "batch_pending"
     STATUS_CHOICES = [
         (STATUS_PENDING, "Pending"),
         (STATUS_RUNNING, "Running"),
         (STATUS_DONE, "Done"),
         (STATUS_FAILED, "Failed"),
+        (STATUS_BATCH_PENDING, "Batch pending"),
     ]
 
     id_submission = models.BigAutoField(primary_key=True)
@@ -925,6 +943,10 @@ class HackathonSubmission(models.Model):
     findings = models.JSONField(null=True, blank=True)
     summary = models.TextField(null=True, blank=True)
     error = models.TextField(null=True, blank=True)
+    # Anthropic Message Batch id this submission was sent in (batch mode only).
+    batch_id = models.CharField(max_length=255, null=True, blank=True)
+    # Batch bookkeeping: {n_chunks:int, chunks:[{idx,char_len}], rubric:{cat:int}}.
+    batch_meta = models.JSONField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     analyzed_at = models.DateTimeField(null=True, blank=True)
 

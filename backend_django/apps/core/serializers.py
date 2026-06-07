@@ -1,6 +1,7 @@
 import re
 
 from rest_framework import serializers
+from django.conf import settings
 from django.contrib.auth.hashers import make_password
 from drf_spectacular.utils import extend_schema_field
 
@@ -480,17 +481,60 @@ def _validate_hackathon_rubric(value):
     return normalized
 
 
+def hackathon_price_per_team(mode):
+    """Per-team charge for a processing mode: batch applies the discount multiplier."""
+    discount = settings.HACKATHON_BATCH_DISCOUNT if mode == "batch" else 1.0
+    return settings.HACKATHON_PRICE_PER_TEAM * discount
+
+
+def hackathon_estimated_total(mode, teams):
+    """Estimated total = per-team price * team count (rounded to 2 decimals)."""
+    return round(hackathon_price_per_team(mode) * (teams or 0), 2)
+
+
 class HackathonSerializer(serializers.ModelSerializer):
     created_by = serializers.PrimaryKeyRelatedField(read_only=True)
     rubric = serializers.JSONField(required=False)
+    processing_mode = serializers.ChoiceField(
+        choices=["normal", "batch"], required=False, default="normal"
+    )
+    expected_teams = serializers.IntegerField(required=False, allow_null=True, min_value=0)
+    price_per_team = serializers.SerializerMethodField()
+    estimated_total = serializers.SerializerMethodField()
 
     class Meta:
         model = Hackathon
-        fields = ["id_hackathon", "name", "created_by", "rubric", "status", "created_at"]
-        read_only_fields = ["id_hackathon", "created_by", "status", "created_at"]
+        fields = [
+            "id_hackathon",
+            "name",
+            "created_by",
+            "rubric",
+            "status",
+            "processing_mode",
+            "expected_teams",
+            "price_per_team",
+            "estimated_total",
+            "created_at",
+        ]
+        read_only_fields = [
+            "id_hackathon",
+            "created_by",
+            "status",
+            "price_per_team",
+            "estimated_total",
+            "created_at",
+        ]
 
     def validate_rubric(self, value):
         return _validate_hackathon_rubric(value)
+
+    @extend_schema_field(serializers.FloatField())
+    def get_price_per_team(self, obj):
+        return round(hackathon_price_per_team(obj.processing_mode), 2)
+
+    @extend_schema_field(serializers.FloatField())
+    def get_estimated_total(self, obj):
+        return hackathon_estimated_total(obj.processing_mode, obj.expected_teams)
 
     def create(self, validated_data):
         # Always persist a full, normalized rubric (defaults applied) even when omitted.

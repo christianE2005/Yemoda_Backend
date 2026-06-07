@@ -68,6 +68,8 @@ from .serializers import (
     GithubRepoSerializer,
     HackathonSerializer,
     HackathonSubmissionSerializer,
+    hackathon_estimated_total,
+    hackathon_price_per_team,
     LoginSerializer,
     MilestoneSerializer,
     ProjectMemberSerializer,
@@ -3654,7 +3656,9 @@ def _drain_pending_reviews_async(project_id: int) -> None:
         pass
 
 
-def _trigger_hackathon_audit_async(submission_id: int, repo_url: str, ref: str, rubric: dict) -> None:
+def _trigger_hackathon_audit_async(
+    submission_id: int, repo_url: str, ref: str, rubric: dict, processing_mode: str = "normal"
+) -> None:
     """Best-effort: ask the FastAPI auditor to score a submission.
 
     Returns 202 immediately; FastAPI runs the analysis in a BackgroundTask and writes the
@@ -3673,6 +3677,7 @@ def _trigger_hackathon_audit_async(submission_id: int, repo_url: str, ref: str, 
                 "repo_url": repo_url,
                 "ref": ref,
                 "rubric": rubric,
+                "processing_mode": processing_mode,
             },
             headers={
                 "Content-Type": "application/json",
@@ -4477,6 +4482,42 @@ class HackathonViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
 
+    @extend_schema(
+        request=dict,
+        responses={200: dict},
+        tags=["hackathons"],
+        summary="Cotizar el costo de auditar un hackathon (por modo y nº de equipos)",
+    )
+    @action(detail=False, methods=["post"], url_path="estimate")
+    def estimate(self, request):
+        """Price quote: given {processing_mode, expected_teams}, return per-team prices and total.
+
+        Authenticated-only (default perms). Pure computation from settings — touches no DB row.
+        """
+        mode = request.data.get("processing_mode") or "normal"
+        if mode not in ("normal", "batch"):
+            raise ValidationError({"processing_mode": "Debe ser 'normal' o 'batch'."})
+
+        teams_raw = request.data.get("expected_teams")
+        if teams_raw in (None, ""):
+            expected_teams = None
+        else:
+            try:
+                expected_teams = int(teams_raw)
+            except (TypeError, ValueError):
+                raise ValidationError({"expected_teams": "Debe ser un entero >= 0 o nulo."})
+            if expected_teams < 0:
+                raise ValidationError({"expected_teams": "Debe ser un entero >= 0 o nulo."})
+
+        return Response({
+            "processing_mode": mode,
+            "expected_teams": expected_teams,
+            "normal_price_per_team": round(hackathon_price_per_team("normal"), 2),
+            "batch_price_per_team": round(hackathon_price_per_team("batch"), 2),
+            "price_per_team": round(hackathon_price_per_team(mode), 2),
+            "estimated_total": hackathon_estimated_total(mode, expected_teams),
+        })
+
     def _get_owned_hackathon(self, pk):
         """Fetch a hackathon owned by the caller, or 404 (never reveal others' hackathons)."""
         hackathon = Hackathon.objects.filter(pk=pk, created_by=self.request.user).first()
@@ -4506,6 +4547,7 @@ class HackathonViewSet(viewsets.ModelViewSet):
             repo_url=submission.repo_url,
             ref=submission.ref,
             rubric=hackathon.rubric or {},
+            processing_mode=submission.hackathon.processing_mode,
         )
         return Response(
             HackathonSubmissionSerializer(submission).data,
