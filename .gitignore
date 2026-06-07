@@ -31,4 +31,6 @@
 # OS
 .DS_Store
 Thumbs.db
-claude.md
+
+# Claude Code (local/personal config — not shared)
+.claude/
