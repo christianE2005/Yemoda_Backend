@@ -40,6 +40,12 @@ SCALER_PATH = MODEL_DIR / "scaler.joblib"
 
 MIN_TRAINING_PROJECTS = 3
 
+# In-process cache of the loaded (model, scaler) keyed by the files' modification times, so we
+# don't joblib.load() from disk on every prediction. Invalidated automatically when the mtimes
+# change (e.g. after train_model rewrites the files) and explicitly via train_model().
+_MODEL_CACHE: tuple | None = None
+_MODEL_CACHE_KEY: tuple[float, float] | None = None
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Feature extraction
@@ -337,6 +343,11 @@ def train_model(db: Session) -> dict:
     joblib.dump(model, MODEL_PATH)
     joblib.dump(scaler, SCALER_PATH)
 
+    # Invalidate the in-process cache so the next prediction reloads the freshly trained files.
+    global _MODEL_CACHE, _MODEL_CACHE_KEY
+    _MODEL_CACHE = None
+    _MODEL_CACHE_KEY = None
+
     logger.info(
         "Model trained on %d projects. R²=%.3f, alpha=%.4f, l1_ratio=%.2f",
         len(X),
@@ -355,12 +366,22 @@ def train_model(db: Session) -> dict:
 
 
 def _load_model() -> tuple | None:
-    if MODEL_PATH.exists() and SCALER_PATH.exists():
-        try:
-            return joblib.load(MODEL_PATH), joblib.load(SCALER_PATH)
-        except Exception as exc:
-            logger.warning("Could not load persisted model: %s", exc)
-    return None
+    global _MODEL_CACHE, _MODEL_CACHE_KEY
+    if not (MODEL_PATH.exists() and SCALER_PATH.exists()):
+        return None
+    # Key the cache on both files' mtimes so a retrain (which rewrites them) is picked up
+    # automatically without restarting the process.
+    cache_key = (MODEL_PATH.stat().st_mtime, SCALER_PATH.stat().st_mtime)
+    if _MODEL_CACHE is not None and _MODEL_CACHE_KEY == cache_key:
+        return _MODEL_CACHE
+    try:
+        loaded = (joblib.load(MODEL_PATH), joblib.load(SCALER_PATH))
+    except Exception as exc:
+        logger.warning("Could not load persisted model: %s", exc)
+        return None
+    _MODEL_CACHE = loaded
+    _MODEL_CACHE_KEY = cache_key
+    return loaded
 
 
 # ─────────────────────────────────────────────────────────────────────────────

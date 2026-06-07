@@ -1,29 +1,20 @@
-import hmac
 import logging
-import os
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 from sqlalchemy.orm import Session
 
-from app.core.deps import get_db
+from app.core.deps import get_db, require_internal_token
 from app.services import ml_service
 
 logger = logging.getLogger(__name__)
 
-# These endpoints are server-to-server only (not called from the browser). Require the same
-# shared internal token used for /webhook/review-task/ so the directly-exposed FastAPI host
-# can't be hit anonymously (paid model abuse, cross-project metric disclosure, training DoS).
-_INTERNAL_TOKEN = os.getenv("GITHUB_APP_WEBHOOK_SECRET", "")
-
-
-def require_internal_token(x_internal_token: str = Header(default="")) -> None:
-    if not _INTERNAL_TOKEN or not hmac.compare_digest(x_internal_token, _INTERNAL_TOKEN):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="No autorizado.")
-
-
+# These endpoints are server-to-server only (not called from the browser). They require the same
+# shared internal token (require_internal_token, defined in app.core.deps) used for
+# /webhook/review-task/ so the directly-exposed FastAPI host can't be hit anonymously (paid model
+# abuse, cross-project metric disclosure, training DoS).
 router = APIRouter(prefix="/predictions", tags=["predictions"], dependencies=[Depends(require_internal_token)])
 limiter = Limiter(key_func=get_remote_address)
 

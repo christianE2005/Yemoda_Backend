@@ -6,16 +6,16 @@ import logging
 import os
 import re
 
-from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request, status
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 from sqlalchemy.orm import Session
 
 from app.core.database import SessionLocal
-from app.models.models import GithubPushEvent, PendingAiReview
+from app.core.deps import require_internal_token
+from app.models.models import GithubPushEvent, PendingAiReview, TaskWarning
 from app.services.agent_service import analyze_push
 from app.services import metering
-from app.services.metering import check_and_consume
 from app.services.github_service import fetch_file_content_at_ref, fetch_push_diff
 from app.services.task_service import (
     add_agent_comment,
@@ -26,7 +26,6 @@ from app.services.task_service import (
     create_warning,
     filter_task_subtree,
     get_active_tasks,
-    get_active_warnings,
     get_blocked_parent_ids,
     get_board_review_settings,
     get_latest_push_with_diff,
@@ -82,6 +81,31 @@ def _verify_signature(payload: bytes, signature: str) -> bool:
     return hmac.compare_digest(signature, expected)
 
 
+# Distinct return states for _analyze_and_apply so callers (especially drain_pending_reviews)
+# can tell "review actually ran" from "model failed, keep the queued row for retry".
+_REVIEW_DONE = "done"          # review ran (success) — quota consumed
+_REVIEW_NO_QUOTA = "no_quota"  # quota exhausted up front — queued or skipped, not consumed
+_REVIEW_FAILED = "failed"      # model raised — NOT consumed, do not delete pending
+
+
+def _active_warnings_by_task(db: Session, task_ids: list[int]) -> dict[int, list[TaskWarning]]:
+    """Fetch all active warnings for the given tasks in a single IN-query, keyed by id_task.
+
+    Avoids the N+1 of calling get_active_warnings() once per task.
+    """
+    result: dict[int, list[TaskWarning]] = {}
+    if not task_ids:
+        return result
+    rows = (
+        db.query(TaskWarning)
+        .filter(TaskWarning.id_task.in_(task_ids), TaskWarning.status == "active")
+        .all()
+    )
+    for w in rows:
+        result.setdefault(w.id_task, []).append(w)
+    return result
+
+
 def _analyze_and_apply(
     db: Session,
     project,
@@ -92,17 +116,21 @@ def _analyze_and_apply(
     push_event,
     trigger: str = "push",
     allow_queue: bool = True,
-) -> bool:
+) -> str:
     """Run Claude on the task tree and apply results (move to review, warnings, comment).
 
     analyze_tasks: tasks sent to the model (nested into a story tree for context).
     lookup_tasks:  tasks for which matches are actually applied. On a push this equals
                    analyze_tasks; on an on-demand parent review it is only the parent,
                    so already-reviewed subtasks are not touched again.
+
+    Returns one of _REVIEW_DONE / _REVIEW_NO_QUOTA / _REVIEW_FAILED.
     """
-    # Quota: count this review against the project's monthly allowance. If exhausted, queue
-    # the push for later retry (automatic trigger) or skip (manual on-demand trigger).
-    allowed, used, q = check_and_consume(db, project.id_project, "reviews")
+    # Quota: count this review against the project's monthly allowance. Pre-check only here;
+    # the unit is consumed AFTER a successful model call so a failure doesn't burn quota. If
+    # exhausted, queue the push for later retry (automatic trigger) or skip (manual trigger).
+    period = metering.current_period()
+    allowed, used, q = metering.has_quota(db, project.id_project, "reviews", period=period)
     if not allowed:
         will_queue = trigger == "push" and allow_queue and push_event is not None
         logger.info(
@@ -115,17 +143,18 @@ def _analyze_and_apply(
                 db.commit()
             except Exception:
                 db.rollback()
-        return False
+        return _REVIEW_NO_QUOTA
 
     stories = build_story_tree(analyze_tasks)
 
-    active_warnings_map: dict[int, list[dict]] = {}
-    for t in analyze_tasks:
-        warnings = get_active_warnings(db, t.id_task)
-        if warnings:
-            active_warnings_map[t.id_task] = [
-                {"id": w.id_warning, "message": w.message} for w in warnings
-            ]
+    # Fetch active warnings for all analyzed tasks in one query (avoids per-task N+1), then
+    # reuse the map both for the model prompt and for resolving warnings on matched stories.
+    warnings_by_task = _active_warnings_by_task(db, [t.id_task for t in analyze_tasks])
+    active_warnings_map: dict[int, list[dict]] = {
+        task_id: [{"id": w.id_warning, "message": w.message} for w in warns]
+        for task_id, warns in warnings_by_task.items()
+        if warns
+    }
 
     try:
         coding_style, review_focus, tech_stack, naming_convention, response_language, custom_instructions = get_board_review_settings(db, project.id_project)
@@ -145,7 +174,11 @@ def _analyze_and_apply(
         logger.info("Analysis complete for project %s (%s): %d matches", project.id_project, trigger, len(analysis.get("matches", [])))
     except Exception as exc:
         logger.error("Claude analysis failed: %s", exc)
-        return True
+        # Model failed: do NOT consume quota and signal failure so a queued review is kept for retry.
+        return _REVIEW_FAILED
+
+    # The model call succeeded — count this review against the project's monthly allowance.
+    metering.consume(db, project.id_project, "reviews", period=period)
 
     review_column = get_review_column(db, project.id_project)
     review_column_id = review_column.id_column if review_column else None
@@ -165,7 +198,7 @@ def _analyze_and_apply(
             move_task_to_review(db, task, review_column_id)
 
         resolved_ids = match.get("resolved_warning_ids") or []
-        task_warns = get_active_warnings(db, story_id)
+        task_warns = warnings_by_task.get(story_id, [])
         for w in task_warns:
             if w.id_warning in resolved_ids:
                 resolve_warning(db, w)
@@ -222,7 +255,7 @@ def _analyze_and_apply(
         add_agent_comment(db, story_id, "\n".join(lines))
         logger.info("Story %s moved to Review and comment added (%s).", story_id, trigger)
 
-    return True
+    return _REVIEW_DONE
 
 
 def drain_pending_reviews(db: Session, project_id: int, max_items: int = 20) -> int:
@@ -232,6 +265,12 @@ def drain_pending_reviews(db: Session, project_id: int, max_items: int = 20) -> 
     internal /webhook/drain-pending/ endpoint (e.g. on plan upgrade). Reuses each push's
     stored diff; file snapshots are not re-fetched. Returns how many were drained.
     """
+    # The project (and therefore its plan/seat-derived quota) is the same for every queued
+    # item, so resolve it once up front instead of per iteration.
+    project = get_project(db, project_id)
+    if project is None:
+        return 0
+
     pendings = (
         db.query(PendingAiReview)
         .filter(PendingAiReview.id_project == project_id)
@@ -241,12 +280,13 @@ def drain_pending_reviews(db: Session, project_id: int, max_items: int = 20) -> 
     )
     drained = 0
     for pending in pendings:
+        # has_quota re-reads the live usage counter each loop (it grows as we consume), but the
+        # plan/seat-based quota ceiling it compares against is fixed for this project.
         ok, _, _ = metering.has_quota(db, project_id, "reviews")
         if not ok:
             break  # no quota left — leave the rest queued
         push = db.query(GithubPushEvent).filter(GithubPushEvent.id_push == pending.id_push).first()
-        project = get_project(db, project_id)
-        if project is None or push is None or not push.diff_text:
+        if push is None or not push.diff_text:
             db.delete(pending)  # stale / unusable — drop it
             db.commit()
             continue
@@ -257,7 +297,7 @@ def drain_pending_reviews(db: Session, project_id: int, max_items: int = 20) -> 
             db.delete(pending)
             db.commit()
             continue
-        ran = _analyze_and_apply(
+        outcome = _analyze_and_apply(
             db,
             project=project,
             analyze_tasks=analyze_tasks,
@@ -268,12 +308,14 @@ def drain_pending_reviews(db: Session, project_id: int, max_items: int = 20) -> 
             trigger="push",
             allow_queue=False,  # never re-queue while draining
         )
-        if ran:
+        if outcome == _REVIEW_DONE:
             db.delete(pending)
             db.commit()
             drained += 1
-        else:
-            break  # quota ran out mid-drain
+        elif outcome == _REVIEW_NO_QUOTA:
+            break  # quota ran out mid-drain — leave this and the rest queued
+        else:  # _REVIEW_FAILED — keep the pending row so it can be retried later
+            break
     if drained:
         logger.info("Drained %d pending review(s) for project %s", drained, project_id)
     return drained
@@ -518,22 +560,18 @@ async def github_push_webhook(
     }
 
 
-@router.post("/review-task/")
+@router.post("/review-task/", dependencies=[Depends(require_internal_token)])
 @limiter.limit("60/minute")
 async def review_task_webhook(
     request: Request,
     background_tasks: BackgroundTasks,
-    x_internal_token: str = Header(default=""),
 ):
     """
     On-demand review of a parent task once all its subtasks are checked.
     Called server-to-server by the Django API (not by GitHub). Analyzes the parent
     against the project's latest stored push diff and applies the result.
+    Auth: the shared internal token (FASTAPI_INTERNAL_TOKEN) via require_internal_token.
     """
-    # Fail closed: require a configured secret AND a matching internal token.
-    if not _WEBHOOK_SECRET or not hmac.compare_digest(x_internal_token, _WEBHOOK_SECRET):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token interno inválido.")
-
     try:
         payload = await request.json()
     except json.JSONDecodeError:
@@ -549,17 +587,14 @@ async def review_task_webhook(
     return {"detail": "Revisión de tarea encolada. Analizando con IA en segundo plano...", "task_id": int(task_id)}
 
 
-@router.post("/drain-pending/")
+@router.post("/drain-pending/", dependencies=[Depends(require_internal_token)])
 @limiter.limit("30/minute")
 async def drain_pending_webhook(
     request: Request,
-    x_internal_token: str = Header(default=""),
 ):
     """Retry queued push reviews. Server-to-server: called by Django on plan upgrade or a
-    monthly-reset cron. Optional body {"project_id": N} limits it to one project."""
-    if not _WEBHOOK_SECRET or not hmac.compare_digest(x_internal_token, _WEBHOOK_SECRET):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token interno inválido.")
-
+    monthly-reset cron. Optional body {"project_id": N} limits it to one project.
+    Auth: the shared internal token (FASTAPI_INTERNAL_TOKEN) via require_internal_token."""
     try:
         payload = await request.json()
     except json.JSONDecodeError:

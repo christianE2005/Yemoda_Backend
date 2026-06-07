@@ -1,4 +1,4 @@
-from sqlalchemy import JSON, Date, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import JSON, BigInteger, Date, DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -8,7 +8,7 @@ from app.core.database import Base
 class UserAccount(Base):
     __tablename__ = "user_account"
 
-    id_user: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    id_user: Mapped[int] = mapped_column(BigInteger, primary_key=True, index=True)
     email: Mapped[str] = mapped_column(String(150), unique=True, nullable=False)
     username: Mapped[str] = mapped_column(String(100), nullable=False)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -18,14 +18,14 @@ class UserAccount(Base):
 class Project(Base):
     __tablename__ = "project"
 
-    id_project: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    id_project: Mapped[int] = mapped_column(BigInteger, primary_key=True, index=True)
     name: Mapped[str] = mapped_column(String(150), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[DateTime] = mapped_column(DateTime, server_default=func.now())
     end_date: Mapped[Date | None] = mapped_column(Date, nullable=True)
     status: Mapped[str | None] = mapped_column(String(50), nullable=True)
     created_by: Mapped[int | None] = mapped_column(
-        Integer,
+        BigInteger,
         ForeignKey("user_account.id_user", ondelete="SET NULL"),
         nullable=True,
     )
@@ -36,9 +36,9 @@ class Project(Base):
 class ProjectRepo(Base):
     __tablename__ = "project_repo"
 
-    id_project_repo: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    id_project_repo: Mapped[int] = mapped_column(BigInteger, primary_key=True, index=True)
     id_project: Mapped[int] = mapped_column(
-        Integer,
+        BigInteger,
         ForeignKey("project.id_project", ondelete="CASCADE"),
         nullable=False,
     )
@@ -49,7 +49,7 @@ class ProjectRepo(Base):
 class Role(Base):
     __tablename__ = "role"
 
-    id_role: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    id_role: Mapped[int] = mapped_column(BigInteger, primary_key=True, index=True)
     name: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
 
@@ -57,19 +57,19 @@ class Role(Base):
 class ProjectMember(Base):
     __tablename__ = "project_member"
     id_user: Mapped[int] = mapped_column(
-        Integer,
+        BigInteger,
         ForeignKey("user_account.id_user", ondelete="CASCADE"),
         primary_key=True,
         nullable=False,
     )
     id_project: Mapped[int] = mapped_column(
-        Integer,
+        BigInteger,
         ForeignKey("project.id_project", ondelete="CASCADE"),
         primary_key=True,
         nullable=False,
     )
     id_role: Mapped[int | None] = mapped_column(
-        Integer,
+        BigInteger,
         ForeignKey("role.id_role", ondelete="SET NULL"),
         nullable=True,
     )
@@ -79,9 +79,9 @@ class ProjectMember(Base):
 class Board(Base):
     __tablename__ = "board"
 
-    id_board: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    id_board: Mapped[int] = mapped_column(BigInteger, primary_key=True, index=True)
     id_project: Mapped[int] = mapped_column(
-        Integer,
+        BigInteger,
         ForeignKey("project.id_project", ondelete="CASCADE"),
         nullable=False,
     )
@@ -99,9 +99,9 @@ class Board(Base):
 class BoardColumn(Base):
     __tablename__ = "board_column"
 
-    id_column: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    id_column: Mapped[int] = mapped_column(BigInteger, primary_key=True, index=True)
     id_board: Mapped[int] = mapped_column(
-        Integer,
+        BigInteger,
         ForeignKey("board.id_board", ondelete="CASCADE"),
         nullable=False,
     )
@@ -114,7 +114,7 @@ class BoardColumn(Base):
 class TaskStatus(Base):
     __tablename__ = "task_status"
 
-    id_status: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    id_status: Mapped[int] = mapped_column(BigInteger, primary_key=True, index=True)
     name: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
 
@@ -122,7 +122,7 @@ class TaskStatus(Base):
 class TaskPriority(Base):
     __tablename__ = "task_priority"
 
-    id_priority: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    id_priority: Mapped[int] = mapped_column(BigInteger, primary_key=True, index=True)
     name: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)
     level: Mapped[int] = mapped_column(Integer, nullable=False)
 
@@ -130,27 +130,31 @@ class TaskPriority(Base):
 class Task(Base):
     __tablename__ = "task"
 
-    id_task: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
-    id_project: Mapped[int | None] = mapped_column(
-        Integer,
+    id_task: Mapped[int] = mapped_column(BigInteger, primary_key=True, index=True)
+    id_project: Mapped[int] = mapped_column(
+        BigInteger,
         ForeignKey("project.id_project", ondelete="CASCADE"),
-        nullable=True,
+        nullable=False,
     )
     id_column: Mapped[int | None] = mapped_column(
-        Integer,
+        BigInteger,
         ForeignKey("board_column.id_column", ondelete="SET NULL"),
         nullable=True,
     )
-    id_sprint: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    id_sprint: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("sprint.id_sprint", ondelete="SET NULL"),
+        nullable=True,
+    )
     id_parent_task: Mapped[int | None] = mapped_column(
-        Integer,
+        BigInteger,
         ForeignKey("task.id_task", ondelete="CASCADE"),
         nullable=True,
     )
     title: Mapped[str] = mapped_column(String(200), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     id_priority: Mapped[int | None] = mapped_column(
-        Integer,
+        BigInteger,
         ForeignKey("task_priority.id_priority", ondelete="SET NULL"),
         nullable=True,
     )
@@ -163,14 +167,14 @@ class Task(Base):
 class TaskComment(Base):
     __tablename__ = "task_comment"
 
-    id_comment: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    id_comment: Mapped[int] = mapped_column(BigInteger, primary_key=True, index=True)
     id_task: Mapped[int] = mapped_column(
-        Integer,
+        BigInteger,
         ForeignKey("task.id_task", ondelete="CASCADE"),
         nullable=False,
     )
     id_user: Mapped[int | None] = mapped_column(
-        Integer,
+        BigInteger,
         ForeignKey("user_account.id_user", ondelete="SET NULL"),
         nullable=True,
     )
@@ -181,9 +185,9 @@ class TaskComment(Base):
 class ActivityLog(Base):
     __tablename__ = "activity_log"
 
-    id_activity: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    id_activity: Mapped[int] = mapped_column(BigInteger, primary_key=True, index=True)
     id_user: Mapped[int | None] = mapped_column(
-        Integer,
+        BigInteger,
         ForeignKey("user_account.id_user", ondelete="SET NULL"),
         nullable=True,
     )
@@ -196,9 +200,9 @@ class ActivityLog(Base):
 class GithubPushEvent(Base):
     __tablename__ = "github_push_event"
 
-    id_push: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    id_push: Mapped[int] = mapped_column(BigInteger, primary_key=True, index=True)
     id_project: Mapped[int | None] = mapped_column(
-        Integer,
+        BigInteger,
         ForeignKey("project.id_project", ondelete="CASCADE"),
         nullable=True,
     )
@@ -218,9 +222,9 @@ class GithubPushEvent(Base):
 class TaskWarning(Base):
     __tablename__ = "task_warning"
 
-    id_warning: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    id_warning: Mapped[int] = mapped_column(BigInteger, primary_key=True, index=True)
     id_task: Mapped[int] = mapped_column(
-        Integer,
+        BigInteger,
         ForeignKey("task.id_task", ondelete="CASCADE"),
         nullable=False,
     )
@@ -229,21 +233,29 @@ class TaskWarning(Base):
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
     created_at: Mapped[DateTime] = mapped_column(DateTime, server_default=func.now())
     resolved_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
-    id_push_created: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    id_push_resolved: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    id_push_created: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("github_push_event.id_push", ondelete="SET NULL"),
+        nullable=True,
+    )
+    id_push_resolved: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("github_push_event.id_push", ondelete="SET NULL"),
+        nullable=True,
+    )
 
 
 class TaskPushMatch(Base):
     __tablename__ = "task_push_match"
 
-    id_match: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    id_match: Mapped[int] = mapped_column(BigInteger, primary_key=True, index=True)
     id_task: Mapped[int] = mapped_column(
-        Integer,
+        BigInteger,
         ForeignKey("task.id_task", ondelete="CASCADE"),
         nullable=False,
     )
     id_push: Mapped[int] = mapped_column(
-        Integer,
+        BigInteger,
         ForeignKey("github_push_event.id_push", ondelete="CASCADE"),
         nullable=False,
     )
@@ -256,9 +268,9 @@ class TaskPushMatch(Base):
 class ProjectAiUsage(Base):
     __tablename__ = "project_ai_usage"
 
-    id_usage: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    id_usage: Mapped[int] = mapped_column(BigInteger, primary_key=True, index=True)
     id_project: Mapped[int] = mapped_column(
-        Integer,
+        BigInteger,
         ForeignKey("project.id_project", ondelete="CASCADE"),
         nullable=False,
     )
@@ -272,14 +284,14 @@ class ProjectAiUsage(Base):
 class PendingAiReview(Base):
     __tablename__ = "pending_ai_review"
 
-    id_pending: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    id_pending: Mapped[int] = mapped_column(BigInteger, primary_key=True, index=True)
     id_project: Mapped[int] = mapped_column(
-        Integer,
+        BigInteger,
         ForeignKey("project.id_project", ondelete="CASCADE"),
         nullable=False,
     )
     id_push: Mapped[int] = mapped_column(
-        Integer,
+        BigInteger,
         ForeignKey("github_push_event.id_push", ondelete="CASCADE"),
         nullable=False,
     )

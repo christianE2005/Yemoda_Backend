@@ -48,7 +48,11 @@ def project_ai_entitlements(project) -> dict:
 
 
 def project_ai_usage_remaining(project, category: str) -> int:
-    """Remaining AI calls of a category this month. Effectively unlimited when enforcement is off."""
+    """Remaining AI calls of a category this month. Effectively unlimited when enforcement is off.
+
+    NOTE: this is a non-atomic UI/pre-check hint (read-then-decide, races under concurrency).
+    The real enforcement is FastAPI's atomic consume; never rely on this alone to gate billing.
+    """
     if not settings.AI_METERING_ENFORCE:
         return 1_000_000
     period = datetime.now(timezone.utc).strftime("%Y-%m")

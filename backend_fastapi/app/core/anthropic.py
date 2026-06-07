@@ -25,4 +25,6 @@ def generate_content(prompt: str, model_name: str = _MODEL, json_mode: bool = Fa
     usage = getattr(message, "usage", None)
     if usage is not None:
         log_usage(label, model_name, usage.input_tokens, usage.output_tokens)
-    return message.content[0].text
+    # The first block isn't guaranteed to be text (e.g. tool_use); concatenate all text
+    # blocks and tolerate empty content.
+    return "".join(getattr(block, "text", "") or "" for block in (message.content or []))

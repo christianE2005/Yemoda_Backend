@@ -11,7 +11,7 @@ import jwt
 import requests
 from django.conf import settings
 from django.contrib.auth.hashers import check_password, make_password
-from django.http import HttpResponse, HttpResponseRedirect, JsonResponse, StreamingHttpResponse
+from django.http import Http404, HttpResponse, HttpResponseRedirect, JsonResponse, StreamingHttpResponse
 from django.db import DatabaseError
 from django.db.models import Q
 from django.utils import timezone as django_timezone
@@ -1244,7 +1244,7 @@ class TaskViewSet(viewsets.ModelViewSet):
                 json={"project_id": task.project_id, "task_id": task.id_task},
                 headers={
                     "Content-Type": "application/json",
-                    "X-Internal-Token": settings.GITHUB_APP_WEBHOOK_SECRET or "",
+                    "X-Internal-Token": settings.FASTAPI_INTERNAL_TOKEN or "",
                 },
                 timeout=5,
             )
@@ -1544,6 +1544,13 @@ class LogoutView(APIView):
 
     @extend_schema(responses={200: dict}, tags=["auth"])
     def post(self, request):
+        # Bump token_version so any still-valid access/refresh tokens for this user are invalidated
+        # (server-side revocation; the JWT `tv` claim no longer matches). Best-effort: logout is
+        # AllowAny, so an unauthenticated/anonymous caller just clears the cookie.
+        user = getattr(request, "user", None)
+        if user is not None and getattr(user, "is_authenticated", False):
+            user.token_version = (getattr(user, "token_version", 0) or 0) + 1
+            user.save(update_fields=["token_version"])
         resp = Response({"detail": "Sesión cerrada."}, status=status.HTTP_200_OK)
         return _clear_refresh_cookie(resp)
 
@@ -3604,15 +3611,22 @@ def _sync_project_subscription_seats(project) -> None:
         items = sub["items"]["data"]
         if not items:
             return
+        # Pick the per-seat monthly item by price id rather than assuming items[0] (a
+        # subscription can carry multiple line items, e.g. add-ons); fall back to the first.
+        target_item = next(
+            (it for it in items if (it.get("price") or {}).get("id") == settings.STRIPE_PRICE_ID_MONTHLY),
+            items[0],
+        )
         seats = max(ProjectMember.objects.filter(project=project).count(), 1)
         stripe.Subscription.modify(
             project.stripe_subscription_id,
-            items=[{"id": items[0]["id"], "quantity": seats}],
+            items=[{"id": target_item["id"], "quantity": seats}],
             proration_behavior="create_prorations",
         )
     except Exception:
+        # Best-effort sync: log the exception (with traceback) instead of swallowing it silently.
         import logging
-        logging.getLogger(__name__).warning(
+        logging.getLogger(__name__).exception(
             "Stripe seat sync failed for project %s", getattr(project, "id_project", None)
         )
 
@@ -3628,7 +3642,7 @@ def _drain_pending_reviews_async(project_id: int) -> None:
             json={"project_id": project_id},
             headers={
                 "Content-Type": "application/json",
-                "X-Internal-Token": settings.GITHUB_APP_WEBHOOK_SECRET or "",
+                "X-Internal-Token": settings.FASTAPI_INTERNAL_TOKEN or "",
             },
             timeout=5,
         )
@@ -3749,7 +3763,10 @@ class StripeWebhookView(APIView):
                     "Stripe checkout %s: paying email differs from account email (user_id=%s).",
                     session_id, user.id_user,
                 )
-            user.is_premium = True
+            # Only grant Pro once Stripe confirms the session is actually paid. If it isn't yet
+            # (e.g. async payment pending), leave plans unchanged and let
+            # customer.subscription.updated reconcile when the payment settles.
+            paid = session_data.get("payment_status") == "paid"
             # Guardar IDs de Stripe en el usuario para poder cancelar/gestionar después
             stripe_customer_id = session_data.get("customer")
             stripe_subscription_id = session_data.get("subscription")
@@ -3757,19 +3774,22 @@ class StripeWebhookView(APIView):
                 user.stripe_customer_id = stripe_customer_id
             if stripe_subscription_id:
                 user.stripe_subscription_id = stripe_subscription_id
-            # Solo actualizar el plan si es un upgrade o primer plan
-            current_rank = _PLAN_RANK.get(user.subscription_plan, 0)
-            new_rank = _PLAN_RANK.get(plan_from_meta, 0)
-            update_fields = ["is_premium", "stripe_customer_id", "stripe_subscription_id"]
-            if new_rank > current_rank:
-                user.subscription_plan = plan_from_meta
-                update_fields.append("subscription_plan")
+            update_fields = ["stripe_customer_id", "stripe_subscription_id"]
+            if paid:
+                user.is_premium = True
+                update_fields.append("is_premium")
+                # Solo actualizar el plan si es un upgrade o primer plan
+                current_rank = _PLAN_RANK.get(user.subscription_plan, 0)
+                new_rank = _PLAN_RANK.get(plan_from_meta, 0)
+                if new_rank > current_rank:
+                    user.subscription_plan = plan_from_meta
+                    update_fields.append("subscription_plan")
             user.save(update_fields=update_fields)
 
             # Per-project upgrade: flip the paid project to Pro + store its subscription, then
-            # release any reviews queued while it was on the Free quota.
+            # release any reviews queued while it was on the Free quota. Only when paid.
             project_id_meta = (session_data.get("metadata") or {}).get("project_id")
-            if project_id_meta:
+            if project_id_meta and paid:
                 proj = Project.objects.filter(id_project=project_id_meta).first()
                 if proj:
                     proj.plan = Project.PLAN_PRO
@@ -3780,23 +3800,67 @@ class StripeWebhookView(APIView):
                     proj.save(update_fields=proj_fields)
                     _drain_pending_reviews_async(proj.id_project)
 
+        elif event["type"] == "customer.subscription.updated":
+            # Reconcile a project's plan with the live subscription status (handles async-settled
+            # payments, recoveries from past_due, and Stripe-side cancellations/lapses).
+            sub_data = event["data"]["object"]
+            stripe_sub_id = sub_data.get("id")
+            sub_status = sub_data.get("status")
+            if stripe_sub_id and sub_status:
+                if sub_status in ("active", "trialing"):
+                    new_plan = Project.PLAN_PRO
+                elif sub_status in ("past_due", "unpaid", "canceled", "incomplete_expired"):
+                    new_plan = Project.PLAN_FREE
+                else:
+                    new_plan = None  # e.g. "incomplete" — leave plan unchanged
+                if new_plan is not None:
+                    affected_projects = list(
+                        Project.objects.filter(stripe_subscription_id=stripe_sub_id)
+                    )
+                    for proj in affected_projects:
+                        if proj.plan != new_plan:
+                            proj.plan = new_plan
+                            proj.save(update_fields=["plan"])
+                            if new_plan == Project.PLAN_PRO:
+                                _drain_pending_reviews_async(proj.id_project)
+                    # Re-derive the owners' user-level premium flag from whether they still own
+                    # ANY Pro project (don't clear it if they have other Pro projects).
+                    owner_ids = {p.created_by_id for p in affected_projects if p.created_by_id}
+                    for owner_id in owner_ids:
+                        still_pro = Project.objects.filter(
+                            created_by_id=owner_id, plan=Project.PLAN_PRO
+                        ).exists()
+                        UserAccount.objects.filter(id_user=owner_id).update(is_premium=still_pro)
+
         elif event["type"] == "customer.subscription.deleted":
             # Stripe confirma la cancelación efectiva (al final del período o inmediata)
             sub_data = event["data"]["object"]
             stripe_sub_id = sub_data.get("id")
             if stripe_sub_id:
-                from apps.core.models import UserAccount as _UserAccount
-                affected = _UserAccount.objects.filter(stripe_subscription_id=stripe_sub_id)
-                affected.update(
-                    is_premium=False,
-                    subscription_plan=None,
-                    stripe_subscription_id=None,
+                # Downgrade any project on this subscription back to Free first.
+                downgraded_projects = list(
+                    Project.objects.filter(stripe_subscription_id=stripe_sub_id)
                 )
-                # Downgrade any project on this subscription back to Free.
                 Project.objects.filter(stripe_subscription_id=stripe_sub_id).update(
                     plan=Project.PLAN_FREE,
                     stripe_subscription_id=None,
                 )
+                # Reconcile each affected user's premium flag from whether they STILL own any
+                # other Pro project — don't blank it globally just because one subscription ended.
+                owner_ids = {p.created_by_id for p in downgraded_projects if p.created_by_id}
+                affected = UserAccount.objects.filter(stripe_subscription_id=stripe_sub_id)
+                owner_ids.update(affected.values_list("id_user", flat=True))
+                for owner_id in owner_ids:
+                    still_pro = Project.objects.filter(
+                        created_by_id=owner_id, plan=Project.PLAN_PRO
+                    ).exists()
+                    update_kwargs = {"is_premium": still_pro}
+                    if not still_pro:
+                        update_kwargs["subscription_plan"] = None
+                    UserAccount.objects.filter(
+                        id_user=owner_id, stripe_subscription_id=stripe_sub_id
+                    ).update(stripe_subscription_id=None)
+                    UserAccount.objects.filter(id_user=owner_id).update(**update_kwargs)
 
         return Response(status=status.HTTP_200_OK)
 
@@ -4072,11 +4136,66 @@ class GithubCommitFilesView(APIView):
 class GithubChatProxyView(APIView):
     """Proxy chat requests from Django to the FastAPI service."""
 
-    @extend_schema(responses={200: dict, 400: dict, 401: dict, 403: dict, 404: dict, 502: dict}, tags=["chat"])
+    @extend_schema(responses={200: dict, 400: dict, 401: dict, 402: dict, 403: dict, 404: dict, 502: dict}, tags=["chat"])
     def post(self, request):
         fastapi_base_url = getattr(settings, "FASTAPI_CHAT_BASE_URL", "https://fast.yemoda.site").rstrip("/")
         upstream_url = f"{fastapi_base_url}/api/chat/"
         payload = request.data
+
+        # Authz + metering pre-check. Resolve the referenced project (if any) from the payload,
+        # require the caller to be a member, and surface 402 when the project's quota is exhausted.
+        # FastAPI remains the atomic consume chokepoint; this is membership + a read-only pre-check.
+        # We inject the resolved project_id into context_data so FastAPI meters the right project.
+        if isinstance(payload, dict):
+            context_data = payload.get("context_data")
+            if not isinstance(context_data, dict):
+                context_data = {}
+            context_type = payload.get("context_type")
+
+            project = None
+            project_id = context_data.get("project_id")
+            if project_id:
+                project = Project.objects.filter(pk=project_id).first()
+                if not project:
+                    return Response({"detail": "Proyecto no encontrado."}, status=status.HTTP_404_NOT_FOUND)
+            else:
+                task_id = context_data.get("task_id")
+                if task_id:
+                    task = Task.objects.filter(pk=task_id).first()
+                    if not task:
+                        return Response({"detail": "Tarea no encontrada."}, status=status.HTTP_404_NOT_FOUND)
+                    project = task.project
+
+            # A project is referenced → require membership and pre-check quota. With no project
+            # referenced, allow general chat through (no hard block).
+            if project is not None:
+                # Any project member (or its creator) may chat — use a membership probe rather
+                # than a specific capability so read-only members aren't blocked.
+                is_member = (
+                    project.created_by_id == getattr(request.user, "id_user", None)
+                    or ProjectMember.objects.filter(project=project, user=request.user).exists()
+                )
+                if not is_member:
+                    return Response(
+                        {"detail": "No eres miembro de este proyecto."},
+                        status=status.HTTP_403_FORBIDDEN,
+                    )
+
+                from .permissions import project_ai_usage_remaining
+                category = "aifix" if context_type == "ai_fix" else "chat"
+                if project_ai_usage_remaining(project, category) <= 0:
+                    return Response(
+                        {
+                            "detail": "Se alcanzó la cuota de IA de este proyecto este mes. Mejora el plan o espera al próximo ciclo.",
+                            "code": "ai_quota_reached",
+                        },
+                        status=status.HTTP_402_PAYMENT_REQUIRED,
+                    )
+
+                # Inject the resolved project id so FastAPI meters the correct project.
+                context_data = {**context_data, "project_id": project.id_project}
+                payload = {**payload, "context_data": context_data}
+
         headers = {
             "Content-Type": "application/json",
             "Accept": request.headers.get("Accept", "application/json"),
@@ -4084,7 +4203,7 @@ class GithubChatProxyView(APIView):
             # can no longer be reached anonymously from the internet. The end user is already
             # authenticated to reach THIS proxy (IsAuthenticated); we do NOT relay the client's
             # Authorization header as a trust signal to the AI service.
-            "X-Internal-Token": settings.GITHUB_APP_WEBHOOK_SECRET or "",
+            "X-Internal-Token": settings.FASTAPI_INTERNAL_TOKEN or "",
         }
 
         stream = bool(payload.get("stream")) if isinstance(payload, dict) else False
@@ -4123,10 +4242,14 @@ class GithubChatProxyView(APIView):
 
 
 class GithubAppDebugView(APIView):
-    """Debug endpoint for GitHub App private key — admin only."""
+    """Debug endpoint for GitHub App private key — admin only, and inert outside DEBUG."""
     permission_classes = [IsAdminUser]
 
     def get(self, request):
+        # Make this diagnostics endpoint non-existent in production: it must never be reachable
+        # when DEBUG is off, even for an admin.
+        if not settings.DEBUG:
+            raise Http404()
         pk = settings.GITHUB_APP_PRIVATE_KEY or ""
         # Only expose booleans about whether the App is configured — never key material,
         # line contents, or stack traces (admin-only, but still no secret fragments).

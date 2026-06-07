@@ -16,7 +16,8 @@ from sqlalchemy.orm import Session
 
 from app.core.ai_cost import log_usage
 from app.core.deps import get_db, require_internal_token
-from app.services.metering import check_and_consume, resolve_project_id
+from app.services import metering
+from app.services.metering import current_period, has_quota, resolve_project_id
 
 logger = logging.getLogger(__name__)
 
@@ -194,10 +195,14 @@ async def _call_yemoda(body: ChatRequest) -> dict:
     # Distinguish the chat surfaces (general / code_review / ai_fix) so each can be costed separately.
     log_usage(f"chat:{getattr(body, 'context_type', None) or 'general'}", model, response.usage.input_tokens, response.usage.output_tokens)
 
+    # The first content block isn't guaranteed to be text (e.g. tool_use); concatenate all
+    # text blocks and tolerate empty content.
+    content = "".join(getattr(block, "text", "") or "" for block in (response.content or []))
+
     return {
         "provider": "yemoda",
         "model": model,
-        "content": response.content[0].text if response.content else "",
+        "content": content,
         "finish_reason": response.stop_reason,
         "usage": {
             "input_tokens": response.usage.input_tokens,
@@ -226,13 +231,20 @@ def list_models():
 async def chat(request: Request, body: ChatRequest, db: Session = Depends(get_db)):
     # Quota: chat questions and AI-fix calls count against the project's monthly allowance.
     # 'ai_fix' (resolve warnings) is the costliest, so it has its own category.
+    # Pre-check before calling the model, but only consume AFTER a successful response so a
+    # model failure doesn't burn a unit. Pin the period so the check and the later consume
+    # land on the same monthly usage row even across a rollover.
     category = "aifix" if body.context_type == "ai_fix" else "chat"
     project_id = resolve_project_id(db, body.context_data)
+    period = current_period()
     if project_id is not None:
-        allowed, used, quota = check_and_consume(db, project_id, category)
+        allowed, used, quota = has_quota(db, project_id, category, period=period)
         if not allowed:
             raise HTTPException(
                 status_code=status.HTTP_402_PAYMENT_REQUIRED,
                 detail=f"AI quota reached for this project ({used}/{quota} {category} this month). Upgrade your plan or wait for the next cycle.",
             )
-    return await _call_yemoda(body)
+    result = await _call_yemoda(body)
+    if project_id is not None:
+        metering.consume(db, project_id, category, period=period)
+    return result

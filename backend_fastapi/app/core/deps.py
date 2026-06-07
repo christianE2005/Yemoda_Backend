@@ -19,7 +19,9 @@ def get_db() -> Generator[Session, None, None]:
 # Shared service-to-service token. These FastAPI endpoints are NOT meant to be reachable from
 # the browser — only the Django backend calls them — so we require a secret header. Without this,
 # the directly-exposed FastAPI host can be hit anonymously (unlimited paid-model abuse).
-_INTERNAL_TOKEN = os.getenv("GITHUB_APP_WEBHOOK_SECRET", "")
+# Prefer a dedicated var; fall back to the webhook secret during rollout so existing deployments
+# keep working until FASTAPI_INTERNAL_TOKEN is provisioned.
+_INTERNAL_TOKEN = os.getenv("FASTAPI_INTERNAL_TOKEN") or os.getenv("GITHUB_APP_WEBHOOK_SECRET", "")
 
 
 def require_internal_token(x_internal_token: str = Header(default="")) -> None:

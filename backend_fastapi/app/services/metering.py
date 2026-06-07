@@ -92,16 +92,23 @@ def _get_or_create_usage(db: Session, project_id: int, period: str) -> ProjectAi
     try:
         db.flush()
     except IntegrityError:
-        # Concurrent create — fall back to the existing row.
+        # Concurrent create — fall back to the existing row. Re-SELECT after the rollback;
+        # a racing transaction may not be visible until its commit, so retry once more if
+        # needed rather than returning None (which would break the caller).
         db.rollback()
         row = db.query(ProjectAiUsage).filter_by(id_project=project_id, period=period).first()
+        if row is None:
+            row = db.query(ProjectAiUsage).filter_by(id_project=project_id, period=period).first()
     return row
 
 
-def has_quota(db: Session, project_id: int, category: str) -> tuple[bool, int, int]:
+def has_quota(
+    db: Session, project_id: int, category: str, period: str | None = None
+) -> tuple[bool, int, int]:
     """Whether the project can make one more call of this category (no mutation)."""
+    period = period or current_period()
     q = quota(db, project_id, category)
-    row = db.query(ProjectAiUsage).filter_by(id_project=project_id, period=current_period()).first()
+    row = db.query(ProjectAiUsage).filter_by(id_project=project_id, period=period).first()
     used = getattr(row, _COLUMN[category]) if row else 0
     if ENFORCE and used >= q:
         return False, used, q
@@ -135,9 +142,13 @@ def _atomic_consume(
     return row[0] if row else None
 
 
-def consume(db: Session, project_id: int, category: str) -> int:
-    """Record one used call of this category (unconditional). Returns the new used count."""
-    new_used = _atomic_consume(db, project_id, category, current_period())
+def consume(db: Session, project_id: int, category: str, period: str | None = None) -> int:
+    """Record one used call of this category (unconditional). Returns the new used count.
+
+    Pass the same `period` used by the preceding has_quota() pre-check so a month rollover
+    between the check and the consume can't split them across two usage rows.
+    """
+    new_used = _atomic_consume(db, project_id, category, period or current_period())
     return new_used if new_used is not None else 0
 
 

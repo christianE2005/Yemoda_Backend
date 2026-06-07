@@ -210,6 +210,9 @@ if "BEGIN" in _raw_private_key:
 GITHUB_APP_PRIVATE_KEY = _raw_private_key
 GITHUB_APP_WEBHOOK_SECRET = os.getenv("GITHUB_APP_WEBHOOK_SECRET", "")
 GITHUB_APP_WEBHOOK_TARGET_URL = os.getenv("GITHUB_APP_WEBHOOK_TARGET_URL", "")
+# Dedicated server-to-server token Django presents to the FastAPI service (X-Internal-Token).
+# Falls back to the GitHub App webhook secret for backwards compatibility if unset.
+FASTAPI_INTERNAL_TOKEN = os.getenv("FASTAPI_INTERNAL_TOKEN") or os.getenv("GITHUB_APP_WEBHOOK_SECRET", "")
 GITHUB_APP_STATE_SECRET = os.getenv("GITHUB_APP_STATE_SECRET", JWT_SECRET_KEY)
 FASTAPI_CHAT_BASE_URL = os.getenv("FASTAPI_CHAT_BASE_URL", "https://fast.yemoda.site")
 CORS_ALLOW_ALL_ORIGINS = os.getenv("CORS_ALLOW_ALL_ORIGINS", "false").lower() == "true"
