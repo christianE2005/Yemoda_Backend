@@ -3689,6 +3689,31 @@ def _trigger_hackathon_audit_async(
         pass
 
 
+def _drain_hackathon_batches(timeout: float = 30) -> None:
+    """Best-effort: ask the FastAPI auditor to finalize batch-mode submissions whose Anthropic
+    Message Batch has ended, writing the scores into the shared DB.
+
+    Batch submissions never complete on their own — this is the poller. The leaderboard endpoint
+    calls it synchronously (only when something is pending) so a single Refresh finalizes ready
+    batches and returns updated scores. Failures/timeouts are swallowed: the drain keeps running
+    on FastAPI's side and the next refresh reflects the result.
+    """
+    base = (settings.FASTAPI_CHAT_BASE_URL or "").rstrip("/")
+    if not base:
+        return
+    try:
+        requests.post(
+            f"{base}/api/audit/drain-batches/",
+            headers={
+                "Content-Type": "application/json",
+                "X-Internal-Token": settings.FASTAPI_INTERNAL_TOKEN or "",
+            },
+            timeout=timeout,
+        )
+    except requests.RequestException:
+        pass
+
+
 class CreateCheckoutSessionView(APIView):
     def post(self, request):
         import stripe
@@ -4561,8 +4586,18 @@ class HackathonViewSet(viewsets.ModelViewSet):
     )
     @action(detail=True, methods=["get"], url_path="leaderboard")
     def leaderboard(self, request, pk=None):
-        """Submissions of an owned hackathon ordered by score DESC (nulls last)."""
+        """Submissions of an owned hackathon ordered by score DESC (nulls last).
+
+        Batch-mode submissions don't self-complete, so when this hackathon has any pending
+        batch we first poke FastAPI's drain to finalize whatever batches have ended — this is
+        what makes a plain Refresh surface the score.
+        """
         hackathon = self._get_owned_hackathon(pk)
+        has_pending = HackathonSubmission.objects.filter(
+            hackathon=hackathon, status="batch_pending"
+        ).exists()
+        if has_pending:
+            _drain_hackathon_batches()
         submissions = HackathonSubmission.objects.filter(hackathon=hackathon).order_by(
             F("score").desc(nulls_last=True), "-created_at"
         )
