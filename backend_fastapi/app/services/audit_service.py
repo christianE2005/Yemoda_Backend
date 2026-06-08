@@ -813,19 +813,26 @@ def cleanup_findings(findings: list[dict]) -> list[dict]:
 # Developer-motive words ("by design", "intentionally", "for clarity") were deliberately removed —
 # they explain WHY buggy code exists and routinely appear inside descriptions of real defects; keying
 # on them silently deleted genuine criticals. We keep only unambiguous self-cancellations.
+# Only EXPLICIT "this is not a defect" declarations — these cannot describe a real bug (a genuine
+# bug is never phrased "not a real defect"). Magnitude qualifiers like "no real impact" / "purely
+# theoretical" were removed: a model naturally appends them to REAL minor bugs ("an off-by-one with
+# no functional impact"), so keying on them dropped genuine low defects.
 _NOISE_PHRASES: tuple[str, ...] = (
-    "no real impact", "no real-world impact", "not a real defect", "not a real issue",
-    "not a real bug", "not actually a defect", "not actually a bug", "not actually an issue",
-    "purely theoretical", "is theoretical", "cosmetic only", "not a security concern",
-    "not exploitable", "has no security impact", "no functional impact",
+    "not a real defect", "not a real issue", "not a real bug", "not a defect",
+    "not actually a defect", "not actually a bug", "not actually an issue",
+    "cosmetic only", "purely cosmetic",
 )
 
 # If a finding mentions a concrete consequence, it is NOT noise no matter what else it says — veto the
-# drop even at low severity and let the context-aware LLM cleanup decide instead.
+# drop even at low severity and let the context-aware LLM cleanup decide instead. Deliberately broad
+# (incl. functional-defect words like "wrong"/"incorrect"/"silently"/"truncat"): erring toward KEEPING
+# a finding is the safe direction — the worst outcome here is showing a low nit, never hiding a bug.
 _IMPACT_TOKENS: tuple[str, ...] = (
     "attacker", "inject", "rce", "remote code", "bypass", "leak", "exploit", "overflow",
     "traversal", "dos", "denial of service", "escalat", "takeover", "csrf", "xss", "sqli",
-    "ssrf", "arbitrary", "unauthorized", "data loss", "corrupt", "crash", "hijack",
+    "ssrf", "arbitrary", "unauthorized", "data loss", "data integrity", "corrupt", "crash", "hijack",
+    "truncat", "silently", "race condition", "deadlock", "off-by-one", "incorrect", "wrong",
+    "memory leak", "infinite loop", "uninitialized",
 )
 
 # Pure style markers; only used to drop a LOW-severity maintainability nit with no concrete impact.
@@ -942,8 +949,11 @@ def _was_analyzed(result: dict[str, Any]) -> bool:
     findings list can never inflate a low or failed analysis to 100.
     """
     breakdown = result.get("score_breakdown") or {}
-    if any((b or {}).get("score", 0) > 0 for b in breakdown.values()):
-        return True
+    for entry in breakdown.values():
+        if isinstance(entry, dict):
+            score = entry.get("score")
+            if isinstance(score, (int, float)) and score > 0:
+                return True
     return bool(result.get("findings"))
 
 
@@ -958,6 +968,11 @@ def finalize_result(result: dict[str, Any], rubric: dict[str, int]) -> dict[str,
         return result
     # Capture the model's holistic per-category scores BEFORE overwriting — they become the ceiling.
     model_breakdown = result.get("score_breakdown") or {}
+    # Defensive: every real pipeline result carries a populated breakdown (reduce_chunk_scores emits
+    # all six categories). If findings exist with no breakdown, the ceiling would default to 100 and
+    # could inflate — surface the anomaly rather than silently grade high.
+    if result.get("findings") and not model_breakdown:
+        logger.warning("hackathon: findings present but score_breakdown empty — score ceiling unbounded")
     findings = apply_noise_backstop(cleanup_findings(result.get("findings") or []))
     score, breakdown = score_from_findings(findings, rubric or {}, model_breakdown)
     result["findings"] = findings
