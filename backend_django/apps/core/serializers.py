@@ -449,10 +449,13 @@ class GithubAppLinkInstallationSerializer(serializers.Serializer):
 
 
 def _validate_hackathon_rubric(value):
-    """Normalize a rubric to {category: non-negative int} over the 6 known categories.
+    """Normalize a rubric to {category: int 0..100} over the 6 known categories.
 
-    Accepts a dict of known category keys -> non-negative ints; rejects unknown keys and
-    negative/non-integer weights; fills missing categories from the default rubric.
+    The weights are a 100-point budget: the judge distributes 100 points across the six
+    categories, so they MUST sum to exactly 100. Unspecified categories count as 0 (a
+    deliberate "this doesn't matter for my event" choice), unknown keys and out-of-range /
+    non-integer weights are rejected. Omitting the rubric entirely falls back to the default
+    (which already sums to 100).
     """
     if value is None:
         return dict(DEFAULT_HACKATHON_RUBRIC)
@@ -466,18 +469,26 @@ def _validate_hackathon_rubric(value):
             f"Válidas: {', '.join(HACKATHON_CATEGORIES)}."
         )
 
-    normalized = dict(DEFAULT_HACKATHON_RUBRIC)
+    # Budget model: missing categories are 0, not the default weight.
+    normalized = {category: 0 for category in HACKATHON_CATEGORIES}
     for category, weight in value.items():
-        # Reject bools (a subclass of int) and non-integers; weights must be >= 0.
+        # Reject bools (a subclass of int) and non-integers; weights are 0..100.
         if isinstance(weight, bool) or not isinstance(weight, int):
             raise serializers.ValidationError(
-                {category: "El peso debe ser un entero no negativo."}
+                {category: "El peso debe ser un entero entre 0 y 100."}
             )
-        if weight < 0:
+        if weight < 0 or weight > 100:
             raise serializers.ValidationError(
-                {category: "El peso no puede ser negativo."}
+                {category: "El peso debe estar entre 0 y 100."}
             )
         normalized[category] = weight
+
+    total = sum(normalized.values())
+    if total != 100:
+        raise serializers.ValidationError(
+            f"Los pesos del rubric deben sumar exactamente 100 (actual: {total}). "
+            "Reparte 100 puntos entre las categorías."
+        )
     return normalized
 
 
