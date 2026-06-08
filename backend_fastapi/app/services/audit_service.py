@@ -783,6 +783,14 @@ def cleanup_findings(findings: list[dict]) -> list[dict]:
     # The pass may only shrink/merge. A list LONGER than the input means it misbehaved — keep original.
     if len(cleaned) > len(findings):
         return findings
+    # Anti-erasure: one misbehaving cleanup response must not silently delete every high-severity
+    # finding. If the input had critical/high items and none survive the cleanup, distrust it and
+    # keep the original list — losing a team's real critical defect is far worse than some noise.
+    high = ("critical", "high")
+    if any(f.get("severity") in high for f in findings) and not any(
+        f.get("severity") in high for f in cleaned
+    ):
+        return findings
     # Anti-escalation: never produce a severity worse than the worst input.
     worst_rank = min(
         (_SEVERITY_ORDER.get(f.get("severity", "low"), 3) for f in findings), default=3
@@ -800,76 +808,121 @@ def cleanup_findings(findings: list[dict]) -> list[dict]:
 # DETERMINISTIC RELIABILITY LAYER — noise backstop + score-from-findings
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Rule-based (no LLM) drop of near-certain non-defects the LLM cleanup may miss. Kept HIGH-PRECISION
-# on purpose: we only drop findings whose OWN text admits they aren't a real problem, plus low-sev
-# pure style nits. Real defects are never dropped here — code-misread false positives (e.g. "X is not
-# validated" when a guard already exists) are the verify pass's job, not this deterministic filter's.
+# Rule-based (no LLM) drop of near-certain non-defects the LLM cleanup may miss. SAFETY FIRST: this
+# filter ONLY ever drops LOW-severity findings, so it can never hide a real critical/high defect.
+# Developer-motive words ("by design", "intentionally", "for clarity") were deliberately removed —
+# they explain WHY buggy code exists and routinely appear inside descriptions of real defects; keying
+# on them silently deleted genuine criticals. We keep only unambiguous self-cancellations.
 _NOISE_PHRASES: tuple[str, ...] = (
-    "this is correct", "is correct but", "logic is correct", "code is correct",
-    "current logic is correct", "the division is safe", "is safe because",
-    "no real impact", "no real-world impact", "not a real defect", "not actually a",
-    "purely theoretical", "is theoretical", "but confusing", "though confusing",
-    "for clarity", "for readability", "for maintainability", "cosmetic only",
-    "by design", "is intentional", "intentionally", "is fine as", "is acceptable",
+    "no real impact", "no real-world impact", "not a real defect", "not a real issue",
+    "not a real bug", "not actually a defect", "not actually a bug", "not actually an issue",
+    "purely theoretical", "is theoretical", "cosmetic only", "not a security concern",
+    "not exploitable", "has no security impact", "no functional impact",
+)
+
+# If a finding mentions a concrete consequence, it is NOT noise no matter what else it says — veto the
+# drop even at low severity and let the context-aware LLM cleanup decide instead.
+_IMPACT_TOKENS: tuple[str, ...] = (
+    "attacker", "inject", "rce", "remote code", "bypass", "leak", "exploit", "overflow",
+    "traversal", "dos", "denial of service", "escalat", "takeover", "csrf", "xss", "sqli",
+    "ssrf", "arbitrary", "unauthorized", "data loss", "corrupt", "crash", "hijack",
+)
+
+# Pure style markers; only used to drop a LOW-severity maintainability nit with no concrete impact.
+_STYLE_TOKENS: tuple[str, ...] = (
+    "naming", "indentation", "whitespace", "typo", "rename", "inconsistent", "readability",
+    "docstring", "formatting", "code style", "magic number",
 )
 
 
 def _is_noise(finding: dict[str, str]) -> bool:
-    """True if a finding is a near-certain non-defect (self-acknowledged or a pure style nit)."""
+    """True only for LOW-severity findings that unambiguously cancel themselves (and mention no
+    concrete impact). Critical/high/medium are NEVER dropped here: clearing a real defect to tidy the
+    list is far worse than showing the occasional low nit, and medium+ noise is left to the
+    context-aware LLM cleanup, which can read the whole sentence.
+    """
+    if finding.get("severity") != "low":
+        return False
     text = ((finding.get("title") or "") + " " + (finding.get("description") or "")).lower()
+    if any(tok in text for tok in _IMPACT_TOKENS):
+        return False
     if any(phrase in text for phrase in _NOISE_PHRASES):
         return True
-    # We don't grade style/formatting, so a LOW-severity maintainability item is a style nit.
-    if finding.get("category") == "maintainability" and finding.get("severity") == "low":
+    # A LOW maintainability item that reads like pure style (and has no concrete impact) is a nit.
+    if finding.get("category") == "maintainability" and any(t in text for t in _STYLE_TOKENS):
         return True
     return False
 
 
 def apply_noise_backstop(findings: list[dict]) -> list[dict]:
-    """Deterministically drop near-certain non-defects the LLM cleanup may have missed.
-
-    High precision by design (no false drops of real defects); never raises. Returns kept findings.
-    """
+    """Deterministically drop only LOW-severity, self-cancelling noise (see _is_noise). High
+    precision by design — never drops a real critical/high/medium defect; never raises."""
     return [f for f in (findings or []) if not _is_noise(f)]
 
 
+def _env_penalty(name: str, default: str) -> float:
+    """Read a tunable penalty from env, tolerating a non-numeric value (falls back + warns) so a typo
+    can never crash app import — mirrors _coerce_score/_normalize_weight hardening of external input."""
+    try:
+        return max(0.0, float(os.getenv(name, default)))
+    except (TypeError, ValueError):
+        logger.warning("hackathon: invalid %s=%r, using default %s", name, os.getenv(name), default)
+        return float(default)
+
+
 # Points each finding subtracts from its category's 100-point base, by severity. Tunable via env so
-# overall strictness can be dialed without code changes. Deterministic: the same findings always
-# yield the same score, and removing or downgrading a finding can only RAISE it (monotonic).
+# overall strictness can be dialed without code changes. The values are CLAMPED into severity order
+# (critical >= high >= medium >= low >= 0) so a misordered override can't break the monotonicity
+# guarantee — downgrading a finding must never raise its penalty.
+_pen_low = _env_penalty("HACKATHON_PENALTY_LOW", "3")
+_pen_med = max(_env_penalty("HACKATHON_PENALTY_MEDIUM", "8"), _pen_low)
+_pen_high = max(_env_penalty("HACKATHON_PENALTY_HIGH", "18"), _pen_med)
+_pen_crit = max(_env_penalty("HACKATHON_PENALTY_CRITICAL", "30"), _pen_high)
 _FINDING_PENALTY: dict[str, float] = {
-    "critical": float(os.getenv("HACKATHON_PENALTY_CRITICAL", "30")),
-    "high": float(os.getenv("HACKATHON_PENALTY_HIGH", "18")),
-    "medium": float(os.getenv("HACKATHON_PENALTY_MEDIUM", "8")),
-    "low": float(os.getenv("HACKATHON_PENALTY_LOW", "3")),
+    "critical": _pen_crit, "high": _pen_high, "medium": _pen_med, "low": _pen_low,
 }
 
 
 def score_from_findings(
-    findings: list[dict], rubric: dict[str, int]
+    findings: list[dict],
+    rubric: dict[str, int],
+    model_breakdown: dict[str, Any] | None = None,
 ) -> tuple[int, dict[str, dict[str, int]]]:
-    """Compute the OFFICIAL score deterministically from the final findings (not the LLM's holistic
-    opinion).
+    """Compute the OFFICIAL score from the final findings, bounded by the model's holistic read.
 
-    Each category starts at 100 and loses _FINDING_PENALTY per finding by severity; the overall is
-    the rubric-weighted average of the six category scores (plain average if all weights are 0).
-    Findings whose category is unknown apply their penalty to the overall directly. Properties:
-    reproducible, transparent (a team can trace its grade to specific findings), and MONOTONIC —
-    fixing or downgrading a finding never lowers the score. Returns (overall, score_breakdown).
+    Per category: start at 100, subtract _FINDING_PENALTY per finding by severity, then cap at the
+    model's own category score (the holistic CEILING). The overall is the rubric-weighted average of
+    the six category scores (plain average if all weights are 0).
+
+    Why the ceiling: a pure 100-minus-penalties score reads an empty findings list as a perfect 100,
+    which would inflate a mediocre or mostly-FAILED analysis (the model scored low but found nothing
+    concrete) to 100. Capping at the model's score prevents that. It still preserves the two
+    properties we care about — the ceiling is fixed w.r.t. the findings, so:
+      * MONOTONIC: removing or downgrading a finding lowers its penalty -> (100-penalty) rises ->
+        min(ceiling, rises) can only rise or stay. Fixing a defect never lowers the grade.
+      * TRANSPARENT: the overall is exactly the rubric-weighted average of the displayed per-category
+        scores (no hidden term), so a team can reconcile its grade with the breakdown.
+    An unknown finding category folds into 'correctness' so its penalty stays visible and diluted.
+    Returns (overall, score_breakdown).
     """
     rubric = rubric or {}
+    model_breakdown = model_breakdown or {}
     penalties: dict[str, float] = {cat: 0.0 for cat in CATEGORIES}
-    uncategorized = 0.0
     for finding in findings or []:
         pen = _FINDING_PENALTY.get(finding.get("severity", "low"), _FINDING_PENALTY["low"])
         cat = finding.get("category", "")
-        if cat in penalties:
-            penalties[cat] += pen
-        else:
-            uncategorized += pen
+        if cat not in penalties:
+            cat = "correctness"  # unknown/hallucinated category -> a real, visible bucket
+        penalties[cat] += pen
 
     breakdown: dict[str, dict[str, int]] = {}
     for cat in CATEGORIES:
-        cat_score = max(0, min(100, round(100 - penalties[cat])))
+        penalty_score = max(0, min(100, round(100 - penalties[cat])))
+        ceiling = 100
+        entry = model_breakdown.get(cat)
+        if isinstance(entry, dict) and entry.get("score") is not None:
+            ceiling = _coerce_score(entry.get("score"))
+        cat_score = min(penalty_score, ceiling)
         breakdown[cat] = {"score": cat_score, "weight": _normalize_weight(rubric.get(cat, 0))}
 
     total_weight = sum(b["weight"] for b in breakdown.values())
@@ -877,16 +930,16 @@ def score_from_findings(
         overall = sum(b["score"] * b["weight"] for b in breakdown.values()) / total_weight
     else:
         overall = sum(b["score"] for b in breakdown.values()) / len(CATEGORIES)
-    overall = max(0, min(100, round(overall - uncategorized)))
-    return overall, breakdown
+    return max(0, min(100, round(overall))), breakdown
 
 
 def _was_analyzed(result: dict[str, Any]) -> bool:
     """True if the audit produced real signal — at least one scored category or any finding.
 
-    Distinguishes a genuinely CLEAN repo (no findings but the model did score categories → grade it
-    deterministically, near 100) from NO-SOURCE / total-analysis-failure (all category scores 0 and
-    no findings → keep the zero result, so an empty findings list never reads as a perfect 100).
+    Distinguishes a CLEAN repo (no findings but the model scored its categories → grade it, capped at
+    the model's holistic read) from NO-SOURCE / total failure (all category scores 0 and no findings
+    → keep the zero result). Combined with the model-score ceiling in score_from_findings, an empty
+    findings list can never inflate a low or failed analysis to 100.
     """
     breakdown = result.get("score_breakdown") or {}
     if any((b or {}).get("score", 0) > 0 for b in breakdown.values()):
@@ -903,8 +956,10 @@ def finalize_result(result: dict[str, Any], rubric: dict[str, int]) -> dict[str,
     """
     if not _was_analyzed(result):
         return result
+    # Capture the model's holistic per-category scores BEFORE overwriting — they become the ceiling.
+    model_breakdown = result.get("score_breakdown") or {}
     findings = apply_noise_backstop(cleanup_findings(result.get("findings") or []))
-    score, breakdown = score_from_findings(findings, rubric or {})
+    score, breakdown = score_from_findings(findings, rubric or {}, model_breakdown)
     result["findings"] = findings
     result["score"] = score
     result["score_breakdown"] = breakdown

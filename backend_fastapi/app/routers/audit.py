@@ -83,8 +83,9 @@ def _run_audit(
                 )
                 if batch_id is None:
                     # No analyzable files -> nothing to batch; finish now with a deterministic
-                    # empty result so the row never gets stuck in batch_pending.
-                    result = score_submission_normal(files, rubric or {})
+                    # empty result so the row never gets stuck in batch_pending. Route through
+                    # finalize_result too (no-op on the empty result) to keep a single scoring funnel.
+                    result = finalize_result(score_submission_normal(files, rubric or {}), rubric or {})
                     submission.batch_meta = batch_meta
                     submission.status = "done"
                     submission.score = result["score"]
