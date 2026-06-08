@@ -502,7 +502,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
         user = self.request.user
         return Project.objects.filter(
             Q(members__user=user) | Q(created_by=user)
-        ).distinct()
+        ).select_related("created_by").distinct()
 
     def create(self, request, *args, **kwargs):
         import logging

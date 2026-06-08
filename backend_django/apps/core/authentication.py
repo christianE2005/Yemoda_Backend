@@ -1,9 +1,12 @@
+import logging
 import os
 import jwt
 from datetime import datetime, timedelta, timezone
 from django.conf import settings
 from rest_framework import authentication, exceptions, permissions
 from .models import UserAccount
+
+logger = logging.getLogger(__name__)
 
 # Window during which a newly-registered (unverified) account may use the API. Shortened from
 # the original 7 days and made configurable to reduce the unverified-access exposure window.
@@ -32,6 +35,7 @@ class UserAccountAuthentication(authentication.BaseAuthentication):
         except jwt.InvalidTokenError:
             raise exceptions.AuthenticationFailed("Token invalido.")
         except Exception:
+            logger.exception("Unexpected error during token authentication.")
             raise exceptions.AuthenticationFailed("Error de autenticacion.")
 
         if payload.get("type") != "access":

@@ -32,7 +32,14 @@ admin.site.register(ProjectRepo)
 admin.site.register(Role)
 admin.site.register(ProjectMember)
 admin.site.register(Board)
-admin.site.register(BoardColumn)
+
+
+@admin.register(BoardColumn)
+class BoardColumnAdmin(admin.ModelAdmin):
+    # __str__ reads self.board.name; join the FK to avoid an N+1 in the changelist.
+    list_select_related = True
+
+
 admin.site.register(Sprint)
 admin.site.register(Milestone)
 admin.site.register(Tag)

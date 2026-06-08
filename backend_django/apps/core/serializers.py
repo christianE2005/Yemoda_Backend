@@ -280,6 +280,8 @@ class TaskSerializer(serializers.ModelSerializer):
     def validate_story_points(self, value):
         if value is not None and value < 1:
             raise serializers.ValidationError("story_points debe ser al menos 1.")
+        if value is not None and value > 1000:
+            raise serializers.ValidationError("story_points no puede ser mayor a 1000.")
         return value
 
     def validate(self, attrs):
@@ -594,7 +596,7 @@ class HackathonSubmissionSerializer(serializers.ModelSerializer):
     def validate_repo_url(self, value):
         url = (value or "").strip()
         # Must be a public GitHub repo URL: https://github.com/<owner>/<repo>
-        if not re.match(r"^https://github\.com/[^/\s]+/[^/\s]+/?$", url):
+        if not re.match(r"^https://github\.com/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/?$", url):
             raise serializers.ValidationError(
                 "repo_url debe ser una URL https://github.com/owner/repo válida."
             )

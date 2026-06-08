@@ -328,7 +328,16 @@ async def _run_push_analysis(payload: dict, db: Session) -> None:
     ref: str = payload.get("ref", "")
     pusher: str | None = (payload.get("pusher") or {}).get("name")
     commits: list = payload.get("commits") or []
-    installation_id: int | None = (payload.get("installation") or {}).get("id")
+    _raw_installation_id = (payload.get("installation") or {}).get("id")
+    # GitHub's installation token fetch (fetch_push_diff / fetch_file_content_at_ref) needs a
+    # numeric installation id. Coerce/validate it; if it's missing or not int-coercible, log and
+    # skip gracefully rather than crashing the background worker.
+    installation_id: int | None
+    try:
+        installation_id = int(_raw_installation_id) if _raw_installation_id is not None else None
+    except (TypeError, ValueError):
+        logger.warning("Push payload has non-int installation id %r — skipping", _raw_installation_id)
+        return
 
     logger.info("Push received: repo=%s ref=%s before=%s after=%s installation_id=%s", repo_full_name, ref, before[:7], after[:7], installation_id)
 

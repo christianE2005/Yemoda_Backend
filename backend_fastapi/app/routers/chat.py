@@ -42,7 +42,8 @@ _ANTHROPIC_DEFAULT_MODEL = "claude-haiku-4-5"
 
 class ChatMessage(BaseModel):
     role: Literal["system", "user", "assistant"]
-    content: str
+    # Per-message length cap so up to 50 messages can't exhaust memory/context.
+    content: str = Field(..., max_length=50_000)
 
 
 class ChatRequest(BaseModel):
@@ -108,6 +109,9 @@ _SYSTEM_PROMPTS: dict[str, str] = {
 
 def _build_system_message(context_type: str | None, context_data: dict | None) -> str:
     base = _SYSTEM_PROMPTS.get(context_type or "general", _SYSTEM_PROMPTS["general"])
+    # Malformed context_data (non-dict) must not raise AttributeError on the .get() calls below.
+    if not isinstance(context_data, dict):
+        context_data = {}
     if not context_data:
         return base
 

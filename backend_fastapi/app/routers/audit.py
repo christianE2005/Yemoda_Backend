@@ -188,6 +188,7 @@ def drain_batches():
                 HackathonSubmission.status == "batch_pending",
                 HackathonSubmission.batch_id.isnot(None),
             )
+            .order_by(HackathonSubmission.id_submission)
             .limit(_DRAIN_BATCH_LIMIT)
             .all()
         )
@@ -198,9 +199,11 @@ def drain_batches():
         client = anthropic.Anthropic()
         for submission in rows:
             try:
-                rubric = (submission.batch_meta or {}).get("rubric") or {}
+                # A corrupted/non-dict batch_meta must not raise AttributeError — treat it as {}.
+                meta = submission.batch_meta if isinstance(submission.batch_meta, dict) else {}
+                rubric = meta.get("rubric") or {}
                 result = finalize_batch(
-                    client, submission.batch_id, submission.batch_meta or {}, rubric
+                    client, submission.batch_id, meta, rubric
                 )
                 if result is None:
                     still_pending += 1
