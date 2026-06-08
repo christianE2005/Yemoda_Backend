@@ -7,7 +7,14 @@ from app.core.ai_cost import log_usage
 
 load_dotenv()
 
-_client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY", ""))
+# Survive transient per-minute rate-limit (429) spikes on low tiers: the SDK honors the
+# retry-after header and backs off exponentially (~1s,2s,4s,8s,16s,32s), so a single audit whose
+# chunks briefly exceed the per-minute token quota waits out the reset instead of failing the
+# submission. Sustained load still needs a higher tier or batch mode. Tunable via ANTHROPIC_MAX_RETRIES.
+_client = anthropic.Anthropic(
+    api_key=os.getenv("ANTHROPIC_API_KEY", ""),
+    max_retries=int(os.getenv("ANTHROPIC_MAX_RETRIES", "6")),
+)
 
 _MODEL = "claude-haiku-4-5"
 
