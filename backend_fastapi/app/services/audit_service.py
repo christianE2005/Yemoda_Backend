@@ -255,31 +255,39 @@ If a category cannot be assessed from these files, give a neutral 50 rather than
 ## Files in this slice:
 {source}
 
-## Severity — assign CONSERVATIVELY using this exact scale:
+## Severity — a finding is ALWAYS a concrete DEFECT (see below). Assign CONSERVATIVELY:
 - "critical": a concrete, exploitable security vulnerability, data loss, or a bug that crashes
   or breaks core functionality in production. Only use this if you can name the specific exploit
   or failure scenario in the description.
 - "high": a serious bug or security weakness likely to cause incorrect behavior or real risk
   under realistic conditions.
-- "medium": a real issue with limited or conditional impact.
-- "low": style, naming, duplication, missing documentation, or missing tests.
+- "medium": a real defect with limited or conditional impact.
+- "low": a real but minor defect (a narrow edge case, low-impact missing error handling).
+
+## What IS a finding — report ONLY these:
+A concrete DEFECT you can directly SEE in the shown code: a security vulnerability, a
+correctness/logic bug, a crash, data loss, an unhandled error that would actually fail, a resource
+or connection leak, or an injection. You must be able to name the input or condition that triggers it.
+
+## What is NOT a finding — NEVER report these (they may inform the category SCORE, but stay OUT of the findings list):
+- Style, naming, formatting, code organization, magic numbers, duplication, missing comments/docs.
+- Missing tests or missing CI (the tdd score already reflects this).
+- "Could be refactored / batched / cached / optimized", or any "consider ..." / "should ideally ..."
+  suggestion. If it is a preference rather than a bug, it is NOT a finding.
 
 ## Hard rules (follow EXACTLY):
-- Missing tests, missing documentation, TODOs, and style/readability concerns are AT MOST "low"
-  — NEVER "high" or "critical".
-- You are seeing only ONE SLICE of the project. NEVER claim the project "has no tests", "lacks
-  CI", or is "missing" anything that could live in files you cannot see. Judge ONLY the code
-  shown, and make every finding about a specific file in THIS slice (put it in "file").
-- Report a finding only for a concrete defect visible in the shown code. Do not pad with generic
-  best-practice advice or hypotheticals.
-- Files may be TRUNCATED to fit length limits (look for a "[truncated ...]" marker). NEVER report a
-  finding about code being incomplete, cut off, truncated, or a "syntax error from an unfinished
-  function/block" — you are only seeing PART of the file, not a real defect.
-- Before reporting a bug, check whether the shown code ALREADY prevents it — an existing guard,
-  null-check, early return, try/except, or default value. If the case is already handled, do NOT
-  report it.
-- Keep "notes" to 1-2 sentences per category. Return AT MOST 20 findings for this slice, ordered
-  by severity.
+- ABSENCE IS NOT A FINDING. You see only ONE SLICE of the project, so you CANNOT verify that
+  something is "missing", "not validated", "not invalidated", "not handled", "has no
+  endpoint/handler/test", or "lacks" X — that handling may live in files you cannot see. Report
+  only a defect directly VISIBLE in the shown code; never report the absence of something.
+- Before reporting a bug, check whether the shown code ALREADY prevents it (an existing guard,
+  null-check, early return, try/except, or default). If it is already handled, do NOT report it.
+- Files may be TRUNCATED (look for a "[truncated ...]" marker). NEVER report code as incomplete,
+  cut off, or a "syntax error from an unfinished block" — you are seeing only PART of a file.
+- Every finding MUST reference a specific file in THIS slice (put it in "file") and describe the
+  concrete failure. Keep "notes" to 1-2 sentences per category. Return AT MOST 15 findings for this
+  slice, ordered by severity. Quality over quantity — emit only real, visible defects (it is correct
+  to return an empty findings list when the slice has none).
 
 Respond ONLY with valid JSON in EXACTLY this shape:
 {{
@@ -530,6 +538,12 @@ existing guard, null-check, early return, try/except, default value, or equivale
 bug is already prevented by the code, respond "drop". Also "drop" any finding that claims the code is
 incomplete, truncated, cut off, or has a "syntax error from an unfinished block": files may be
 truncated for length (look for a "[truncated ...]" marker), which is not a real defect.
+
+Also "drop" findings that are NOT concrete defects: pure style/naming/formatting, magic numbers,
+missing tests/docs, "could be refactored/batched/optimized", or any "consider/should ideally"
+preference. And "drop" any finding that asserts something is "missing", "not validated/handled",
+"has no endpoint/test", or otherwise claims an ABSENCE — that cannot be verified from one file.
+Keep a finding only if it is a real defect you can point to in the source shown.
 
 ## FILE: {path}
 {code}
