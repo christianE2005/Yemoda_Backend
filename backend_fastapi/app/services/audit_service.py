@@ -12,19 +12,25 @@ rubric (MAP), then deterministically combine the per-chunk scores/findings in co
 import io
 import json
 import logging
+import os
 import tarfile
 from typing import Any
 from urllib.parse import urlparse
 
 import httpx
 
-from app.core.anthropic import _MODEL, generate_content
+from app.core.anthropic import generate_content
 from app.services.github_service import (
     GITHUB_API_URL,
     _generate_app_jwt,
 )
 
 logger = logging.getLogger(__name__)
+
+# Model used to SCORE hackathon submissions. Defaults to Sonnet 4.6 — its stronger instruction
+# following yields far fewer false/nitpick findings and more consistent grades than Haiku for this
+# nuanced judgment task. Set HACKATHON_AI_MODEL=claude-haiku-4-5 to trade quality for lower cost.
+_AUDIT_MODEL = os.getenv("HACKATHON_AI_MODEL", "claude-sonnet-4-6")
 
 # Fixed categories scored by the AI (the rubric only weights them).
 CATEGORIES: tuple[str, ...] = (
@@ -635,6 +641,7 @@ def verify_findings_pass(files: dict[str, str], findings: list[dict]) -> list[di
         try:
             text = generate_content(
                 build_verify_prompt(path, files[path], group),
+                model_name=_AUDIT_MODEL,
                 json_mode=True,
                 label="hackathon_verify",
                 max_tokens=2048,
@@ -695,8 +702,8 @@ def score_submission_normal(files: dict[str, str], rubric: dict[str, int]) -> di
     for chunk in chunks:
         prompt = build_chunk_prompt(chunk)
         text = generate_content(
-            prompt, json_mode=True, label="hackathon_audit", max_tokens=_BATCH_MAX_TOKENS,
-            temperature=0,
+            prompt, model_name=_AUDIT_MODEL, json_mode=True, label="hackathon_audit",
+            max_tokens=_BATCH_MAX_TOKENS, temperature=0,
         )
         result = _parse_chunk_result(text)
         result["_n_files"] = len(chunk)
@@ -729,8 +736,8 @@ def submit_batch(
     batch_meta = {"n_chunks":N, "chunks":[{"idx":i,"char_len":len}], "rubric":rubric,
                   "verify":bool, "repo_url":str, "ref":str}.
     The verify/repo_url/ref keys let finalize_batch re-fetch the source and run the high-fidelity
-    verification pass later. Uses the SAME model string as core/anthropic.generate_content. If there
-    are no files, returns (None, meta) with n_chunks=0 so the caller can short-circuit.
+    verification pass later. Uses the configured _AUDIT_MODEL. If there are no files, returns
+    (None, meta) with n_chunks=0 so the caller can short-circuit.
     """
     import anthropic
     from anthropic.types.message_create_params import MessageCreateParamsNonStreaming
@@ -754,7 +761,7 @@ def submit_batch(
         Request(
             custom_id=f"chunk-{i}",
             params=MessageCreateParamsNonStreaming(
-                model=_MODEL,
+                model=_AUDIT_MODEL,
                 max_tokens=_BATCH_MAX_TOKENS,
                 temperature=0,  # reproducible, comparable grades across submissions
                 system=(
