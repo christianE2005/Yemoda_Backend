@@ -181,3 +181,27 @@ def check_and_consume(db: Session, project_id: int, category: str) -> tuple[bool
         used = getattr(row, _COLUMN[category]) if row else q
         return False, used, q
     return True, new_used, q
+
+
+def refund(db: Session, project_id: int, category: str, period: str | None = None) -> None:
+    """Give back one consumed unit — e.g. the model call failed after check_and_consume reserved it.
+
+    Atomically decrements the period counter, floored at 0 (GREATEST(... , 0)), in a single
+    statement, so it can never drive the count negative or race with concurrent consumes.
+    Best-effort: a no-row result is logged, not raised. Pass the same `period` used to consume so a
+    month rollover can't split the reserve from its refund.
+    """
+    period = period or current_period()
+    col = _COLUMN[category]
+    stmt = text(
+        f"UPDATE project_ai_usage SET {col} = GREATEST({col} - 1, 0), updated_at = CURRENT_TIMESTAMP "
+        f"WHERE id_project = :pid AND period = :period "
+        f"RETURNING {col}"
+    )
+    row = db.execute(stmt, {"pid": project_id, "period": period}).first()
+    db.commit()
+    if row is None:
+        logger.warning(
+            "refund() found no usage row for project %s category %s period %s",
+            project_id, category, period,
+        )

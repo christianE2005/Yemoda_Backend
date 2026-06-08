@@ -930,6 +930,18 @@ class BoardColumnViewSet(viewsets.ModelViewSet):
         if not isinstance(items, list):
             return Response({"detail": "Se esperaba una lista de {id_column, order}."}, status=status.HTTP_400_BAD_REQUEST)
 
+        # Validate shape/types up front — the reorder is atomic and `order` flows straight into the
+        # DB, so a non-int or out-of-range value would raise a DB error or corrupt ordering. (bool is
+        # an int subclass, so reject it explicitly.)
+        for item in items:
+            if not isinstance(item, dict):
+                return Response({"detail": "Cada elemento debe ser un objeto {id_column, order}."}, status=status.HTTP_400_BAD_REQUEST)
+            cid, order = item.get('id_column'), item.get('order')
+            if cid is not None and (isinstance(cid, bool) or not isinstance(cid, int)):
+                return Response({"detail": "id_column debe ser un entero."}, status=status.HTTP_400_BAD_REQUEST)
+            if order is not None and (isinstance(order, bool) or not isinstance(order, int) or not (0 <= order <= 100000)):
+                return Response({"detail": "order debe ser un entero entre 0 y 100000."}, status=status.HTTP_400_BAD_REQUEST)
+
         user = request.user
         user_project_ids = Project.objects.filter(
             Q(members__user=user) | Q(created_by=user)
@@ -1028,7 +1040,12 @@ class MilestoneViewSet(viewsets.ModelViewSet):
         project_created_date = project.created_at.date() if hasattr(project.created_at, 'date') else project.created_at
         if isinstance(due_date, str):
             from datetime import date as _date
-            due_date = _date.fromisoformat(due_date)
+            try:
+                due_date = _date.fromisoformat(due_date)
+            except ValueError:
+                raise ValidationError(
+                    {"due_date": "Formato de fecha inválido (se espera YYYY-MM-DD)."}
+                )
         if due_date < project_created_date:
             raise ValidationError(
                 {"due_date": "La fecha no puede ser anterior a la creación del proyecto."}

@@ -182,10 +182,12 @@ def fetch_repo_source(repo_url: str, ref: str) -> dict[str, str]:
                 continue
             extracted = tar.extractfile(member)
             if extracted is None:
+                logger.warning("fetch_repo_source: could not extract %s — skipping", rel_path)
                 continue
             try:
                 content = extracted.read().decode("utf-8", errors="replace")
-            except Exception:
+            except Exception as exc:
+                logger.warning("fetch_repo_source: failed to read %s (%s) — skipping", rel_path, exc)
                 continue
             if len(content) > _MAX_PER_FILE_CHARS:
                 # Mark the cut explicitly so the model never mistakes a length-truncated file for

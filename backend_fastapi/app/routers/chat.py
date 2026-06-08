@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 from app.core.ai_cost import log_usage
 from app.core.deps import get_db, require_internal_token
 from app.services import metering
-from app.services.metering import current_period, has_quota, resolve_project_id
+from app.services.metering import current_period, resolve_project_id
 
 logger = logging.getLogger(__name__)
 
@@ -247,13 +247,20 @@ async def chat(request: Request, body: ChatRequest, db: Session = Depends(get_db
     project_id = resolve_project_id(db, body.context_data)
     period = current_period()
     if project_id is not None:
-        allowed, used, quota = has_quota(db, project_id, category, period=period)
+        # Atomic check+consume closes the TOCTOU race: two concurrent calls can't both pass the last
+        # available unit (has_quota+consume could). We reserve the unit BEFORE the model call and
+        # refund it if the call fails, so a model error still doesn't burn quota.
+        allowed, used, quota = metering.check_and_consume(db, project_id, category)
         if not allowed:
             raise HTTPException(
                 status_code=status.HTTP_402_PAYMENT_REQUIRED,
                 detail=f"AI quota reached for this project ({used}/{quota} {category} this month). Upgrade your plan or wait for the next cycle.",
             )
-    result = await _call_yemoda(body)
-    if project_id is not None:
-        metering.consume(db, project_id, category, period=period)
+        try:
+            result = await _call_yemoda(body)
+        except Exception:
+            metering.refund(db, project_id, category, period=period)
+            raise
+    else:
+        result = await _call_yemoda(body)
     return result
