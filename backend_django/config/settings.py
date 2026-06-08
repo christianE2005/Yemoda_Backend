@@ -188,6 +188,10 @@ JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 JWT_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", "60"))
 JWT_REFRESH_EXPIRE_MINUTES = int(os.getenv("JWT_REFRESH_EXPIRE_MINUTES", "10080"))
 
+# Key for encrypting third-party tokens at rest (GitHub OAuth access/refresh tokens). Prefer a
+# dedicated, STABLE value in production; falls back to DJANGO_SECRET_KEY in dev. See apps/core/crypto.py.
+TOKEN_ENCRYPTION_KEY = os.getenv("TOKEN_ENCRYPTION_KEY", "")
+
 GITHUB_APP_ID = os.getenv("GITHUB_APP_ID", "")
 GITHUB_APP_SLUG = os.getenv("GITHUB_APP_SLUG", "")
 GITHUB_APP_CLIENT_ID = os.getenv("GITHUB_APP_CLIENT_ID", "")
