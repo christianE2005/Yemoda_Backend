@@ -536,11 +536,16 @@ def reduce_chunk_scores(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# VERIFY (high-fidelity adversarial re-judge of critical/high findings)
+# VERIFY (high-fidelity adversarial re-judge of critical/high/medium findings)
 # ─────────────────────────────────────────────────────────────────────────────
 
-_VERIFY_MAX_FILES = 10                          # cap on file-groups we spend a call on
-_VERIFY_SEVERITIES: tuple[str, ...] = ("critical", "high")
+# Medium is included: the deterministic score is computed from the findings, so a by-design /
+# already-handled / outdated MEDIUM that survives the MAP pass directly (and unfairly) drags the
+# grade down. Re-reading the cited file is the only thing that reliably refutes those, so high-
+# fidelity now re-judges medium too. The file-group cap is raised so medium coverage is broad;
+# findings are severity-sorted, so critical/high groups are always verified before mediums.
+_VERIFY_MAX_FILES = 20                          # cap on file-groups we spend a call on
+_VERIFY_SEVERITIES: tuple[str, ...] = ("critical", "high", "medium")
 
 _VERIFY_PROMPT = """\
 You are a skeptical security/code reviewer. For EACH reported finding, decide using ONLY
@@ -607,13 +612,15 @@ def _downgrade_severity(current: str, target: str) -> str:
 
 
 def verify_findings_pass(files: dict[str, str], findings: list[dict]) -> list[dict]:
-    """Adversarially re-judge critical/high findings against their cited source file.
+    """Adversarially re-judge critical/high/medium findings against their cited source file.
 
-    Splits findings into to_verify (severity in _VERIFY_SEVERITIES) and passthrough (the rest).
+    Splits findings into to_verify (severity in _VERIFY_SEVERITIES) and passthrough (low only).
     Groups to_verify by cited file and, for up to _VERIFY_MAX_FILES groups with available source,
-    asks the model to keep/downgrade/drop each finding. low/medium findings pass through untouched;
-    numeric scores are never changed. Returns passthrough + kept verified findings, severity-sorted
-    and capped at _MAX_FINDINGS.
+    asks the model to keep/downgrade/drop each finding — re-reading the code refutes by-design /
+    already-handled / outdated claims the MAP pass got wrong. low findings pass through untouched;
+    numeric scores are never changed. On any call/parse failure a group is kept as-is (verify never
+    loses findings to an error). Returns passthrough + kept verified findings, severity-sorted and
+    capped at _MAX_FINDINGS.
     """
     to_verify: list[dict] = []
     passthrough: list[dict] = []
@@ -626,7 +633,7 @@ def verify_findings_pass(files: dict[str, str], findings: list[dict]) -> list[di
     if not to_verify:
         return findings
 
-    # Group the critical/high findings by their cited file (deterministic order).
+    # Group the to-verify findings by their cited file (deterministic, severity-sorted order).
     groups: dict[str, list[dict]] = {}
     for finding in to_verify:
         path = finding.get("file") or ""
