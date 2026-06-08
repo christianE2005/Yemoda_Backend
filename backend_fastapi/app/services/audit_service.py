@@ -46,6 +46,10 @@ _SOURCE_EXTENSIONS: tuple[str, ...] = (
 # Path fragments that mark vendored / generated / VCS dirs we never analyze.
 _EXCLUDED_DIRS: tuple[str, ...] = (
     "node_modules/", "vendor/", "dist/", "build/", ".git/",
+    # Migrations are auto-generated historical schema, not the team's code. Auditing them yields
+    # noise and false positives — e.g. an old migration's plain CharField reads as "plaintext"
+    # even after the live model switched to an encrypted field.
+    "migrations/",
 )
 
 # Lockfiles never carry meaningful source to score.

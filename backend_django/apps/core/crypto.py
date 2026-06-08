@@ -11,10 +11,13 @@ affected users simply need to reconnect GitHub. Never lose data, but tokens beco
 import base64
 import functools
 import hashlib
+import logging
 
 from cryptography.fernet import Fernet, InvalidToken
 from django.conf import settings
 from django.db import models
+
+logger = logging.getLogger(__name__)
 
 
 @functools.lru_cache(maxsize=1)
@@ -39,7 +42,11 @@ class EncryptedField(models.TextField):
         try:
             return _fernet().decrypt(value.encode()).decode()
         except (InvalidToken, ValueError, TypeError):
-            return value  # legacy plaintext / undecryptable — return unchanged
+            # Legacy plaintext (pre-encryption rows, re-encrypted on next save) or data under a
+            # different key. Return as-is so reads never break, but log it so genuine corruption
+            # (after migration 0055 has re-encrypted everything) isn't masked.
+            logger.warning("EncryptedField: value could not be decrypted; returning it unchanged")
+            return value
 
     def get_prep_value(self, value):
         value = super().get_prep_value(value)
