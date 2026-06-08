@@ -33,6 +33,14 @@ logger = logging.getLogger(__name__)
 # false/nitpick findings) at ~3x the cost.
 _AUDIT_MODEL = os.getenv("HACKATHON_AI_MODEL", "claude-haiku-4-5")
 
+# Model used by the HIGH-FIDELITY verify pass (adversarial re-read of critical/high/medium findings).
+# Defaults to Sonnet 4.6 ON PURPOSE: the refuter must NOT share the scoring model's blind spots —
+# Haiku judging its own output re-makes the same misreads, so a stronger model is what actually drops
+# false positives (e.g. "missing timeout" when a timeout already exists). Only runs in high-fidelity
+# (the premium tier) and only on ≤_VERIFY_MAX_FILES file-groups, so the extra cost is bounded. Set
+# HACKATHON_VERIFY_MODEL=claude-haiku-4-5 to keep verify on Haiku.
+_VERIFY_MODEL = os.getenv("HACKATHON_VERIFY_MODEL", "claude-sonnet-4-6")
+
 # Fixed categories scored by the AI (the rubric only weights them).
 CATEGORIES: tuple[str, ...] = (
     "security",
@@ -66,7 +74,7 @@ _EXCLUDED_FILENAMES: frozenset[str] = frozenset({
 })
 
 _MAX_TARBALL_BYTES = 40 * 1024 * 1024          # hard cap on the streamed download (~40MB)
-_MAX_PER_FILE_CHARS = 50_000                   # per-file cap (raised from 20k for fuller coverage of large files)
+_MAX_PER_FILE_CHARS = 80_000                   # per-file cap — fuller coverage of large files (also lets the verify pass see guards far from a flagged line)
 _MAX_CHUNK_CHARS = 120_000                     # per-chunk cap on concatenated source sent to the model
 _MAX_FINDINGS = 50                             # cap on combined findings after reduce
 _BATCH_MAX_TOKENS = 4096                       # output cap per chunk request (normal + batch)
@@ -651,7 +659,7 @@ def verify_findings_pass(files: dict[str, str], findings: list[dict]) -> list[di
         try:
             text = generate_content(
                 build_verify_prompt(path, files[path], group),
-                model_name=_AUDIT_MODEL,
+                model_name=_VERIFY_MODEL,
                 json_mode=True,
                 label="hackathon_verify",
                 max_tokens=2048,
