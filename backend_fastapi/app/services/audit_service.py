@@ -27,10 +27,11 @@ from app.services.github_service import (
 
 logger = logging.getLogger(__name__)
 
-# Model used to SCORE hackathon submissions. Defaults to Sonnet 4.6 — its stronger instruction
-# following yields far fewer false/nitpick findings and more consistent grades than Haiku for this
-# nuanced judgment task. Set HACKATHON_AI_MODEL=claude-haiku-4-5 to trade quality for lower cost.
-_AUDIT_MODEL = os.getenv("HACKATHON_AI_MODEL", "claude-sonnet-4-6")
+# Model used to SCORE hackathon submissions. Defaults to Haiku 4.5 (cheapest, fast). Reliability
+# comes from the strict defects-only prompt + temperature=0 + anchors + verify pass. Set
+# HACKATHON_AI_MODEL=claude-sonnet-4-6 if you want stronger instruction-following (fewer
+# false/nitpick findings) at ~3x the cost.
+_AUDIT_MODEL = os.getenv("HACKATHON_AI_MODEL", "claude-haiku-4-5")
 
 # Fixed categories scored by the AI (the rubric only weights them).
 CATEGORIES: tuple[str, ...] = (
