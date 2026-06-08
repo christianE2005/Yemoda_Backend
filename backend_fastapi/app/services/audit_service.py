@@ -250,7 +250,14 @@ based solely on the files in this slice:
 - maintainability: readability, structure, naming, duplication, documentation, modularity.
 - tdd: presence and quality of automated tests, coverage of edge cases, test structure.
 
-If a category cannot be assessed from these files, give a neutral 50 rather than 0.
+## Scoring anchors — apply the SAME absolute standard every time so scores are comparable across submissions:
+- 90-100: no real defects in this slice; solid, idiomatic, handles errors and edge cases.
+- 70-89: minor issues only; generally sound.
+- 50-69: some real defects or gaps that need attention.
+- 30-49: serious defects likely to cause failures.
+- 0-29: critical or broken — would fail or be exploitable in production.
+Judge each category against THESE anchors, not relative to other submissions. If a category
+genuinely cannot be assessed from these files, give a neutral 50.
 
 ## Files in this slice:
 {source}
@@ -631,6 +638,7 @@ def verify_findings_pass(files: dict[str, str], findings: list[dict]) -> list[di
                 json_mode=True,
                 label="hackathon_verify",
                 max_tokens=2048,
+                temperature=0,
             )
             parsed = _parse_model_json(text)
         except Exception:
@@ -687,7 +695,8 @@ def score_submission_normal(files: dict[str, str], rubric: dict[str, int]) -> di
     for chunk in chunks:
         prompt = build_chunk_prompt(chunk)
         text = generate_content(
-            prompt, json_mode=True, label="hackathon_audit", max_tokens=_BATCH_MAX_TOKENS
+            prompt, json_mode=True, label="hackathon_audit", max_tokens=_BATCH_MAX_TOKENS,
+            temperature=0,
         )
         result = _parse_chunk_result(text)
         result["_n_files"] = len(chunk)
@@ -747,6 +756,7 @@ def submit_batch(
             params=MessageCreateParamsNonStreaming(
                 model=_MODEL,
                 max_tokens=_BATCH_MAX_TOKENS,
+                temperature=0,  # reproducible, comparable grades across submissions
                 system=(
                     "Respond only with valid JSON. Do not include markdown, "
                     "code fences, or any other text."

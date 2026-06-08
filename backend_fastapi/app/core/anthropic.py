@@ -19,14 +19,18 @@ _client = anthropic.Anthropic(
 _MODEL = "claude-haiku-4-5"
 
 
-def generate_content(prompt: str, model_name: str = _MODEL, json_mode: bool = False, label: str = "generate_content", max_tokens: int = 4096) -> str:
+def generate_content(prompt: str, model_name: str = _MODEL, json_mode: bool = False, label: str = "generate_content", max_tokens: int = 4096, temperature: float | None = None) -> str:
     system = "Respond only with valid JSON. Do not include markdown, code fences, or any other text." if json_mode else "You are a helpful assistant."
 
+    # Pass temperature only when set, so existing callers keep the model default. Scoring callers
+    # pass temperature=0 for reproducible, comparable grades (low run-to-run variance).
+    extra = {} if temperature is None else {"temperature": temperature}
     message = _client.messages.create(
         model=model_name,
         max_tokens=max_tokens,
         system=system,
         messages=[{"role": "user", "content": prompt}],
+        **extra,
     )
     # Record exact token usage + estimated cost (used to derive C = cost per review).
     usage = getattr(message, "usage", None)
