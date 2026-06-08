@@ -176,7 +176,15 @@ def fetch_repo_source(repo_url: str, ref: str) -> dict[str, str]:
                 content = extracted.read().decode("utf-8", errors="replace")
             except Exception:
                 continue
-            files[rel_path] = content[:_MAX_PER_FILE_CHARS]
+            if len(content) > _MAX_PER_FILE_CHARS:
+                # Mark the cut explicitly so the model never mistakes a length-truncated file for
+                # "incomplete code" / an unfinished function / a syntax error — a real source of
+                # false-positive findings.
+                content = (
+                    content[:_MAX_PER_FILE_CHARS]
+                    + "\n\n# ... [truncated for length — the rest of this file is not shown] ...\n"
+                )
+            files[rel_path] = content
 
     return files
 
@@ -260,6 +268,12 @@ If a category cannot be assessed from these files, give a neutral 50 rather than
   shown, and make every finding about a specific file in THIS slice (put it in "file").
 - Report a finding only for a concrete defect visible in the shown code. Do not pad with generic
   best-practice advice or hypotheticals.
+- Files may be TRUNCATED to fit length limits (look for a "[truncated ...]" marker). NEVER report a
+  finding about code being incomplete, cut off, truncated, or a "syntax error from an unfinished
+  function/block" — you are only seeing PART of the file, not a real defect.
+- Before reporting a bug, check whether the shown code ALREADY prevents it — an existing guard,
+  null-check, early return, try/except, or default value. If the case is already handled, do NOT
+  report it.
 - Keep "notes" to 1-2 sentences per category. Return AT MOST 20 findings for this slice, ordered
   by severity.
 
@@ -500,6 +514,12 @@ _VERIFY_PROMPT = """\
 You are a skeptical security/code reviewer. For EACH reported finding, decide using ONLY
 the source file shown whether it is genuinely valid at the stated severity. Default to downgrading or
 dropping when evidence is weak, hypothetical, or not actually present in this file.
+
+Before keeping a finding, check whether the shown code ALREADY handles the described case — an
+existing guard, null-check, early return, try/except, default value, or equivalent. If the reported
+bug is already prevented by the code, respond "drop". Also "drop" any finding that claims the code is
+incomplete, truncated, cut off, or has a "syntax error from an unfinished block": files may be
+truncated for length (look for a "[truncated ...]" marker), which is not a real defect.
 
 ## FILE: {path}
 {code}
