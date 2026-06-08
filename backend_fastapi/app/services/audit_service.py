@@ -686,72 +686,6 @@ def score_submission(files: dict[str, str], rubric: dict[str, int]) -> dict[str,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CONSOLIDATE — merge near-duplicate findings (final pass)
-# ─────────────────────────────────────────────────────────────────────────────
-
-_CONSOLIDATE_PROMPT = """\
-You are consolidating a code-review findings list produced by analyzing a repository in separate
-slices. Some entries are DUPLICATES or near-duplicates of the SAME underlying issue — worded
-differently, or attributed to different files (e.g. a model defined in models.py and again referenced
-from a migration). Merge those into a single entry.
-
-Rules:
-- Merge entries ONLY when they describe the SAME underlying problem. When unsure, keep them separate.
-- For a merged group: keep the HIGHEST severity, the clearest title, a combined 1-2 sentence
-  description, and put the most relevant path in "file".
-- Do NOT invent new findings. Do NOT raise any severity. Do NOT alter entries that have no duplicate.
-- Preserve every DISTINCT real issue — only collapse true duplicates.
-
-## Findings (1-based):
-{findings}
-
-Respond ONLY with STRICT JSON in EXACTLY this shape (the consolidated, deduplicated list):
-{{"findings":[{{"category":"security|performance|robustness|correctness|maintainability|tdd","severity":"critical|high|medium|low","title":"<string>","file":"<path or empty>","description":"<1-2 sentences>"}}]}}
-"""
-
-
-def consolidate_findings(findings: list[dict]) -> list[dict]:
-    """Merge near-duplicate findings (same root issue, different wording/file) via one cheap LLM pass.
-
-    Guarded so it can only SHRINK the list: on any failure, an empty result, or a list LONGER than the
-    input (a misbehaving model), the original findings are returned unchanged. Severities are re-capped
-    and re-sorted afterwards so the pass can never escalate. No-op for fewer than 2 findings.
-    """
-    if not findings or len(findings) < 2:
-        return findings
-    listing = "\n".join(
-        f"{i}. [{f.get('severity', 'low')}] ({f.get('category', '')}) {f.get('title', '')}"
-        f" — file: {f.get('file') or 'n/a'} — {f.get('description', '')}"
-        for i, f in enumerate(findings, 1)
-    )
-    try:
-        text = generate_content(
-            _CONSOLIDATE_PROMPT.format(findings=listing),
-            json_mode=True,
-            label="hackathon_consolidate",
-            max_tokens=2048,
-        )
-        parsed = _parse_model_json(text)
-        merged = _normalize_findings(parsed.get("findings") if isinstance(parsed, dict) else None)
-    except Exception:
-        return findings
-    # The pass may only MERGE (shrink). Anything else means it misbehaved — keep the original.
-    if not merged or len(merged) > len(findings):
-        return findings
-    # Anti-escalation: consolidation can never produce a severity worse than the worst input.
-    worst_rank = min(
-        (_SEVERITY_ORDER.get(f.get("severity", "low"), 3) for f in findings), default=3
-    )
-    worst_sev = next((s for s, r in _SEVERITY_ORDER.items() if r == worst_rank), "low")
-    for finding in merged:
-        if _SEVERITY_ORDER.get(finding.get("severity", "low"), 3) < worst_rank:
-            finding["severity"] = worst_sev
-        _cap_finding_severity(finding)
-    merged.sort(key=lambda f: _SEVERITY_ORDER.get(f.get("severity", "low"), 3))
-    return merged[:_MAX_FINDINGS]
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # BATCH (Anthropic Message Batches) — submit + finalize
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -883,6 +817,4 @@ def finalize_batch(
         except Exception as exc:
             logger.info("Batch verify skipped for %s: %s", batch_id, exc)
 
-    # Final pass: merge near-duplicate findings across slices (keep-on-failure, shrink-only).
-    result["findings"] = consolidate_findings(result["findings"])
     return result
