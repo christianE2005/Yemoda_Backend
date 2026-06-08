@@ -243,11 +243,25 @@ If a category cannot be assessed from these files, give a neutral 50 rather than
 ## Files in this slice:
 {source}
 
-## Instructions:
-- Be evidence-based: cite concrete files in findings.
-- Severity scale for findings: "critical" | "high" | "medium" | "low".
-- Keep "notes" to 1-2 sentences per category.
-- Return AT MOST 25 findings for this slice, ordered by severity.
+## Severity — assign CONSERVATIVELY using this exact scale:
+- "critical": a concrete, exploitable security vulnerability, data loss, or a bug that crashes
+  or breaks core functionality in production. Only use this if you can name the specific exploit
+  or failure scenario in the description.
+- "high": a serious bug or security weakness likely to cause incorrect behavior or real risk
+  under realistic conditions.
+- "medium": a real issue with limited or conditional impact.
+- "low": style, naming, duplication, missing documentation, or missing tests.
+
+## Hard rules (follow EXACTLY):
+- Missing tests, missing documentation, TODOs, and style/readability concerns are AT MOST "low"
+  — NEVER "high" or "critical".
+- You are seeing only ONE SLICE of the project. NEVER claim the project "has no tests", "lacks
+  CI", or is "missing" anything that could live in files you cannot see. Judge ONLY the code
+  shown, and make every finding about a specific file in THIS slice (put it in "file").
+- Report a finding only for a concrete defect visible in the shown code. Do not pad with generic
+  best-practice advice or hypotheticals.
+- Keep "notes" to 1-2 sentences per category. Return AT MOST 20 findings for this slice, ordered
+  by severity.
 
 Respond ONLY with valid JSON in EXACTLY this shape:
 {{
@@ -375,6 +389,19 @@ def _empty_result(rubric: dict[str, int]) -> dict[str, Any]:
 
 _SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 
+# Process/quality categories are never an exploitable defect, so their findings are capped here
+# regardless of what the model claims: absence of tests or a maintainability nit must not surface
+# as critical/high. This is the deterministic backstop behind the prompt's severity rules.
+_MAX_SEVERITY_BY_CATEGORY = {"tdd": "medium", "maintainability": "high"}
+
+
+def _cap_finding_severity(finding: dict[str, str]) -> dict[str, str]:
+    """Clamp a finding's severity to its per-category ceiling (e.g. tdd never above medium)."""
+    cap = _MAX_SEVERITY_BY_CATEGORY.get(finding.get("category", ""))
+    if cap and _SEVERITY_ORDER.get(finding.get("severity", "low"), 3) < _SEVERITY_ORDER[cap]:
+        finding["severity"] = cap
+    return finding
+
 
 def reduce_chunk_scores(
     chunk_results: list[dict[str, Any]],
@@ -420,12 +447,31 @@ def reduce_chunk_scores(
         # All rubric weights zero: fall back to a plain average of the six categories.
         overall = round(sum(b["score"] for b in breakdown.values()) / len(CATEGORIES))
 
-    # Concatenate, normalize, and order findings; cap at _MAX_FINDINGS.
+    # Combine findings across slices, then make them reliable:
+    #   1) cap process-category severities (tests/maintainability are never critical),
+    #   2) dedup repeats across slices by (category, title, file), keeping the most severe,
+    #   3) order by severity and cap the total.
     all_findings: list[dict[str, str]] = []
     for result in chunk_results:
         all_findings.extend(_normalize_findings(result.get("findings")))
-    all_findings.sort(key=lambda f: _SEVERITY_ORDER.get(f.get("severity", "low"), 3))
-    findings = all_findings[:_MAX_FINDINGS]
+    for finding in all_findings:
+        _cap_finding_severity(finding)
+    deduped: dict[tuple[str, str, str], dict[str, str]] = {}
+    for finding in all_findings:
+        key = (
+            finding.get("category", ""),
+            " ".join((finding.get("title") or "").lower().split()),
+            (finding.get("file") or "").lower(),
+        )
+        current = deduped.get(key)
+        if current is None or (
+            _SEVERITY_ORDER.get(finding["severity"], 3)
+            < _SEVERITY_ORDER.get(current["severity"], 3)
+        ):
+            deduped[key] = finding
+    findings = sorted(
+        deduped.values(), key=lambda f: _SEVERITY_ORDER.get(f.get("severity", "low"), 3)
+    )[:_MAX_FINDINGS]
 
     # _n_files is set by the normal MAP driver; batch results don't carry it, so fall back to
     # describing chunk coverage only.
