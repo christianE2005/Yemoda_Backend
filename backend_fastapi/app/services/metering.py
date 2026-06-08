@@ -142,14 +142,26 @@ def _atomic_consume(
     return row[0] if row else None
 
 
-def consume(db: Session, project_id: int, category: str, period: str | None = None) -> int:
-    """Record one used call of this category (unconditional). Returns the new used count.
+def consume(db: Session, project_id: int, category: str, period: str | None = None) -> int | None:
+    """Record one used call of this category (unconditional). Returns the new used count,
+    or None if the increment did not apply (no usage row matched the UPDATE).
+
+    Because this path passes no quota_limit, a successful consume always lands at >= 1, so
+    None is unambiguously "not recorded" — distinct from a real used count. Callers that need
+    to react to a failed consume can check for None; existing callers ignore the result.
 
     Pass the same `period` used by the preceding has_quota() pre-check so a month rollover
     between the check and the consume can't split them across two usage rows.
     """
-    new_used = _atomic_consume(db, project_id, category, period or current_period())
-    return new_used if new_used is not None else 0
+    period = period or current_period()
+    new_used = _atomic_consume(db, project_id, category, period)
+    if new_used is None:
+        logger.warning(
+            "consume() did not record usage for project %s category %s period %s "
+            "(no usage row matched the UPDATE)",
+            project_id, category, period,
+        )
+    return new_used
 
 
 def check_and_consume(db: Session, project_id: int, category: str) -> tuple[bool, int, int]:

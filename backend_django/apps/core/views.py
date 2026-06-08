@@ -2,8 +2,10 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
 import json
+import logging
 import re
 import secrets
+import time
 import unicodedata
 from urllib.parse import urlencode, urlsplit, urlunsplit
 
@@ -12,7 +14,7 @@ import requests
 from django.conf import settings
 from django.contrib.auth.hashers import check_password, make_password
 from django.http import Http404, HttpResponse, HttpResponseRedirect, JsonResponse, StreamingHttpResponse
-from django.db import DatabaseError
+from django.db import DatabaseError, IntegrityError, transaction
 from django.db.models import F, Q
 from django.utils import timezone as django_timezone
 from drf_spectacular.utils import extend_schema
@@ -105,6 +107,33 @@ from .permissions import (
 GITHUB_API_URL = "https://api.github.com"
 
 MAX_COLUMNS_PER_BOARD = 6
+
+logger = logging.getLogger(__name__)
+
+
+def _github_request_with_retry(method: str, url: str, *, attempts: int = 3, backoff: float = 0.5, **kwargs):
+    """Perform a GitHub HTTP request, retrying on transient failures (5xx / network errors).
+
+    Returns the final ``requests.Response`` (which may still be a >=500 on the last attempt),
+    or re-raises the last ``requests.RequestException`` if every attempt failed at the network
+    level. 4xx responses are returned immediately (not retried) so callers keep their existing
+    error handling. ``timeout`` should be passed by the caller and is preserved as-is.
+    """
+    last_exc = None
+    for attempt in range(attempts):
+        try:
+            resp = requests.request(method, url, **kwargs)
+        except requests.RequestException as exc:
+            last_exc = exc
+            if attempt == attempts - 1:
+                raise
+        else:
+            if resp.status_code < 500 or attempt == attempts - 1:
+                return resp
+            logger.warning("GitHub %s %s returned %s; retrying (%d/%d).", method, url, resp.status_code, attempt + 1, attempts)
+        time.sleep(backoff * (attempt + 1))
+    # Unreachable in practice: the loop always returns or raises on the last attempt.
+    raise last_exc if last_exc else RuntimeError("GitHub request failed without a response.")
 
 
 def _slugify(text: str) -> str:
@@ -222,17 +251,21 @@ def _refresh_github_token(connection: GithubConnection) -> bool:
     if connection.refresh_token_expires_at and connection.refresh_token_expires_at <= now:
         return False
 
-    resp = requests.post(
-        _GITHUB_OAUTH_TOKEN_URL,
-        headers={"Accept": "application/json"},
-        data={
-            "client_id": settings.GITHUB_APP_CLIENT_ID,
-            "client_secret": settings.GITHUB_APP_CLIENT_SECRET,
-            "grant_type": "refresh_token",
-            "refresh_token": connection.refresh_token,
-        },
-        timeout=20,
-    )
+    try:
+        resp = _github_request_with_retry(
+            "POST",
+            _GITHUB_OAUTH_TOKEN_URL,
+            headers={"Accept": "application/json"},
+            data={
+                "client_id": settings.GITHUB_APP_CLIENT_ID,
+                "client_secret": settings.GITHUB_APP_CLIENT_SECRET,
+                "grant_type": "refresh_token",
+                "refresh_token": connection.refresh_token,
+            },
+            timeout=20,
+        )
+    except requests.RequestException:
+        return False
     if resp.status_code >= 400:
         return False
 
@@ -262,7 +295,8 @@ def _get_valid_github_token(connection: GithubConnection) -> str | None:
 
 
 def _installation_access_token(installation_id: int) -> str:
-    token_resp = requests.post(
+    token_resp = _github_request_with_retry(
+        "POST",
         f"{GITHUB_API_URL}/app/installations/{installation_id}/access_tokens",
         headers=_github_app_headers(),
         timeout=20,
@@ -322,15 +356,19 @@ def _resolve_org_installation_for_user(user: UserAccount, org_login: str) -> int
 
 def _add_github_collaborator(repo_full_name: str, github_login: str, admin_token: str, permission: str = "push") -> str:
     """Add a GitHub user as collaborator using the repo admin's OAuth token."""
-    import logging
-    logger = logging.getLogger(__name__)
+    try:
+        resp = _github_request_with_retry(
+            "PUT",
+            f"{GITHUB_API_URL}/repos/{repo_full_name}/collaborators/{github_login}",
+            headers=_github_headers(admin_token),
+            json={"permission": permission},
+            timeout=20,
+        )
+    except requests.RequestException as exc:
+        msg = f"github request failed: {exc}"
+        logger.warning("Could not add %s as collaborator to %s: %s", github_login, repo_full_name, exc)
+        return msg
 
-    resp = requests.put(
-        f"{GITHUB_API_URL}/repos/{repo_full_name}/collaborators/{github_login}",
-        headers=_github_headers(admin_token),
-        json={"permission": permission},
-        timeout=20,
-    )
     if resp.status_code >= 400:
         msg = f"github error {resp.status_code}: {resp.text}"
         logger.warning("Could not add %s as collaborator to %s: %s", github_login, repo_full_name, resp.text)
@@ -356,16 +394,17 @@ def _build_signed_oauth_state(user_id: int | None = None) -> str:
 
 def _send_verification_email(user: "UserAccount") -> None:
     """Creates a new email verification token and sends the link via Resend."""
-    # Invalidate any previous unused tokens for this user
-    EmailVerificationToken.objects.filter(user=user, used=False).delete()
-
     token_value = secrets.token_urlsafe(32)
     expires_at = datetime.now(timezone.utc) + timedelta(hours=24)
-    EmailVerificationToken.objects.create(
-        user=user,
-        token=token_value,
-        expires_at=expires_at,
-    )
+    # Invalidate any previous unused tokens and create the new one atomically so a concurrent
+    # call can't delete the row we just created (or leave the user with zero valid tokens).
+    with transaction.atomic():
+        EmailVerificationToken.objects.filter(user=user, used=False).delete()
+        EmailVerificationToken.objects.create(
+            user=user,
+            token=token_value,
+            expires_at=expires_at,
+        )
 
     verify_link = f"{settings.EMAIL_VERIFICATION_BASE_URL}?token={token_value}"
     html_body = f"""
@@ -389,21 +428,28 @@ def _send_verification_email(user: "UserAccount") -> None:
         "Si no creaste esta cuenta, puedes ignorar este correo.\n\n"
         "— El equipo de Yemoda"
     )
-    requests.post(
-        "https://api.resend.com/emails",
-        headers={
-            "Authorization": f"Bearer {settings.RESEND_API_KEY}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "from": settings.RESEND_FROM_EMAIL,
-            "to": [user.email],
-            "subject": "Verifica tu correo — Yemoda",
-            "html": html_body,
-            "text": text_body,
-        },
-        timeout=10,
-    )
+    # A Resend outage must not 500 the registration: the token is already persisted, so the
+    # user can re-request the email later. Log and continue on any delivery failure.
+    try:
+        resp = requests.post(
+            "https://api.resend.com/emails",
+            headers={
+                "Authorization": f"Bearer {settings.RESEND_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "from": settings.RESEND_FROM_EMAIL,
+                "to": [user.email],
+                "subject": "Verifica tu correo — Yemoda",
+                "html": html_body,
+                "text": text_body,
+            },
+            timeout=10,
+        )
+        if resp.status_code >= 400:
+            logger.warning("Resend rejected verification email for user %s: %s %s", user.id_user, resp.status_code, resp.text)
+    except requests.RequestException:
+        logger.exception("Failed to send verification email for user %s", user.id_user)
 
 
 def _validate_signed_oauth_state(state: str) -> tuple[bool, int | None]:
@@ -505,12 +551,21 @@ class ProjectViewSet(viewsets.ModelViewSet):
         ).select_related("created_by").distinct()
 
     def create(self, request, *args, **kwargs):
-        import logging
         try:
             return super().create(request, *args, **kwargs)
+        except (ValidationError, PermissionDenied, Http404):
+            # Expected client errors: let DRF's handler render the proper 400/403/404.
+            raise
+        except IntegrityError:
+            # DB constraint violation (e.g. duplicate / bad FK) is a client-fixable 400, not a 500.
+            logger.warning("Project creation failed due to integrity error", exc_info=True)
+            return Response(
+                {"detail": "No se pudo crear el proyecto: datos inválidos o duplicados."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         except Exception:
-            # Do not leak internals (stack trace / settings) to the client.
-            logging.getLogger(__name__).exception("Project creation failed")
+            # Truly unexpected: do not leak internals (stack trace / settings) to the client.
+            logger.exception("Project creation failed")
             return Response(
                 {"detail": "No se pudo crear el proyecto."},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -522,7 +577,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
         try:
             seed_default_project_roles(project)
         except Exception:
-            pass
+            logger.exception("Failed to seed default project roles for project %s", project.pk)
         try:
             admin_role = ProjectRole.objects.filter(project=project, is_admin_role=True).first()
             ProjectMember.objects.get_or_create(
@@ -531,7 +586,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
                 defaults={"role": None, "project_role": admin_role},
             )
         except Exception:
-            pass
+            logger.exception("Failed to add creator as admin member of project %s", project.pk)
 
     def perform_update(self, serializer):
         # Project creator/admin or a role with can_manage_project.
@@ -1984,6 +2039,14 @@ class GithubAppOauthCallbackView(APIView):
         token_user = _user_from_bearer_token(request)
         if request.method == "POST" and not token_user:
             return None, "Authorization Bearer requerido para vincular GitHub al usuario actual.", status.HTTP_401_UNAUTHORIZED
+
+        # Bind the signed state to the authenticated caller: if the state carries a uid (it was
+        # minted for a specific user) and the request is authenticated as a *different* user,
+        # reject it. This blocks replaying another user's state to link/hijack GitHub under the
+        # wrong account. (Assumption: when no Bearer token is present — browser GET redirect — the
+        # signed, short-lived state is the only available proof of identity, so we trust its uid.)
+        if token_user and state_user_id and token_user.id_user != state_user_id:
+            return None, "OAuth state no corresponde al usuario autenticado.", status.HTTP_400_BAD_REQUEST
 
         # For GET callbacks (browser redirects), use the user_id embedded in the state JWT
         # since no Bearer token is available in browser redirects.

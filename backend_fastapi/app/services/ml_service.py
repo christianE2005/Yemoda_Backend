@@ -63,9 +63,11 @@ def _extract_features(db: Session, project_id: int, reference_date: date | None 
     ref = reference_date or date.today()
     ref_ts = datetime.combine(ref, datetime.min.time()).replace(tzinfo=timezone.utc)
 
-    # ── Project deadline ─────────────────────────────────────────────────────
+    # ── Project deadline & creation date ─────────────────────────────────────
+    # Both columns come from the same single-row lookup, so fetch them together
+    # instead of issuing a second SELECT for created_at later.
     project_row = db.execute(
-        text("SELECT end_date FROM project WHERE id_project = :pid"),
+        text("SELECT end_date, created_at FROM project WHERE id_project = :pid"),
         {"pid": project_id},
     ).fetchone()
 
@@ -73,6 +75,7 @@ def _extract_features(db: Session, project_id: int, reference_date: date | None 
         return None
 
     end_date = project_row[0]
+    project_created_at = project_row[1]
     days_remaining = (end_date - ref).days if end_date else None
 
     # ── Task aggregates ───────────────────────────────────────────────────────
@@ -143,14 +146,19 @@ def _extract_features(db: Session, project_id: int, reference_date: date | None 
     v_last_week = float(velocity_row[0])
     v_prev_week = float(velocity_row[1])
 
-    # All-time average weekly velocity
-    project_created_row = db.execute(
-        text("SELECT created_at FROM project WHERE id_project = :pid"),
-        {"pid": project_id},
-    ).fetchone()
+    # All-time average weekly velocity. created_at was fetched above. Guard for
+    # NULL and for either a datetime (has .date()) or a plain date value, so a
+    # missing/odd creation timestamp falls back to a 1-week age instead of raising.
+    created_date = None
+    if project_created_at is not None:
+        created_date = (
+            project_created_at.date()
+            if isinstance(project_created_at, datetime)
+            else project_created_at
+        )
     project_age_weeks = max(
         1,
-        (ref - project_created_row[0].date()).days / 7 if project_created_row and project_created_row[0] else 1,
+        (ref - created_date).days / 7 if created_date is not None else 1,
     )
     velocity_avg = float(completed_points) / project_age_weeks
 

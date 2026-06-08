@@ -89,6 +89,11 @@ def filter_task_subtree(tasks: list[Task], root_id: int) -> list[Task]:
     parent task we also pull its active subtasks so the agent sees the breakdown.
     """
     by_id = {t.id_task: t for t in tasks}
+    if root_id not in by_id:
+        # Distinguish "root absent from the task list" (likely a caller bug) from
+        # the legitimate "root present but childless" case — both otherwise return [].
+        logger.warning("filter_task_subtree: root_id %s not found in task list — returning empty subtree", root_id)
+        return []
     children: dict[int, list[Task]] = {}
     for t in tasks:
         parent_id = getattr(t, "id_parent_task", None)

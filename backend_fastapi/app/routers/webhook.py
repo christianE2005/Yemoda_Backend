@@ -287,15 +287,36 @@ def drain_pending_reviews(db: Session, project_id: int, max_items: int = 20) -> 
             break  # no quota left — leave the rest queued
         push = db.query(GithubPushEvent).filter(GithubPushEvent.id_push == pending.id_push).first()
         if push is None or not push.diff_text:
-            db.delete(pending)  # stale / unusable — drop it
-            db.commit()
+            # Dropping a queued review we can no longer run: surface the data loss so it's not silent.
+            if push is None:
+                logger.warning(
+                    "Dropping pending review %s for project %s: push %s no longer exists",
+                    pending.id_pending, project_id, pending.id_push,
+                )
+            else:
+                logger.warning(
+                    "Dropping pending review for project %s: push %s has no stored diff_text",
+                    project_id, pending.id_push,
+                )
+            try:
+                db.delete(pending)  # stale / unusable — drop it
+                db.commit()
+            except Exception as exc:
+                db.rollback()
+                logger.warning("Failed to drop stale pending review for project %s: %s", project_id, exc)
+                break
             continue
         tasks = get_active_tasks(db, project_id)
         blocked = get_blocked_parent_ids(tasks)
         analyze_tasks = [t for t in tasks if t.id_task not in blocked]
         if not analyze_tasks:
-            db.delete(pending)
-            db.commit()
+            try:
+                db.delete(pending)
+                db.commit()
+            except Exception as exc:
+                db.rollback()
+                logger.warning("Failed to drop pending review (no active tasks) for project %s: %s", project_id, exc)
+                break
             continue
         outcome = _analyze_and_apply(
             db,
@@ -309,8 +330,13 @@ def drain_pending_reviews(db: Session, project_id: int, max_items: int = 20) -> 
             allow_queue=False,  # never re-queue while draining
         )
         if outcome == _REVIEW_DONE:
-            db.delete(pending)
-            db.commit()
+            try:
+                db.delete(pending)
+                db.commit()
+            except Exception as exc:
+                db.rollback()
+                logger.warning("Failed to clear drained pending review for project %s: %s", project_id, exc)
+                break
             drained += 1
         elif outcome == _REVIEW_NO_QUOTA:
             break  # quota ran out mid-drain — leave this and the rest queued
@@ -476,6 +502,10 @@ def _process_push(payload: dict) -> None:
     db: Session = SessionLocal()
     try:
         asyncio.run(_run_push_analysis(payload, db))
+    except Exception as exc:
+        # Background task: nothing is awaiting this, so an uncaught error (incl. asyncio.run
+        # itself failing, e.g. if invoked from a running loop) would be lost. Log it.
+        logger.exception("Push analysis background task failed: %s", exc)
     finally:
         db.close()
 

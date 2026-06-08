@@ -209,20 +209,37 @@ class TaskAssignedUserSerializer(serializers.Serializer):
     id_assignment = serializers.IntegerField()
 
 
-def _sum_leaf_points(task, _depth=0):
+def _sum_leaf_points(task, _depth=0, _children_by_parent=None):
     """
     Sum story_points across the leaf descendants of a task.
 
     Only leaf tasks (no subtasks) carry real points; a parent rolls up the points
     of its leaves. Returns the task's own story_points when it has no subtasks.
     The depth guard protects against accidentally cyclic data.
+
+    To avoid an N+1 query per descendant, all descendants are fetched once (a single
+    query against the task's project) and recursion walks an in-memory parent->children
+    map. The result is identical to recursively reading ``task.subtasks``.
     """
     if _depth > 20:
         return 0
-    subtasks = list(task.subtasks.all())
+
+    if _children_by_parent is None:
+        # Load every task in this project once and index by parent; the subtree of
+        # `task` is a subset of these rows. Walking the in-memory map keeps the points
+        # sum identical while collapsing the per-node queries into one.
+        _children_by_parent = {}
+        for row in Task.objects.filter(project_id=task.project_id).only(
+            "id_task", "parent_id", "story_points"
+        ):
+            _children_by_parent.setdefault(row.parent_id, []).append(row)
+
+    subtasks = _children_by_parent.get(task.pk, [])
     if not subtasks:
         return task.story_points or 0
-    return sum(_sum_leaf_points(s, _depth + 1) for s in subtasks)
+    return sum(
+        _sum_leaf_points(s, _depth + 1, _children_by_parent) for s in subtasks
+    )
 
 
 class SubtaskProgressSerializer(serializers.Serializer):
@@ -320,19 +337,21 @@ class TaskSerializer(serializers.ModelSerializer):
                     seen.add(ancestor.pk)
                     ancestor = ancestor.parent
 
-        # ── Completion blocking: a parent cannot be MOVED to a final column while
-        #    it still has incomplete subtasks. Only enforced when board_column is
-        #    explicitly provided (a transition), so unrelated edits on a task that
-        #    already sits in a final column are not blocked. ──────────────────────
-        board_column = attrs.get('board_column', serializers.empty)
-        moving_to_final = (
-            board_column is not serializers.empty
-            and board_column is not None
-            and board_column.is_final
-        )
-        if moving_to_final and self.instance is not None:
+        # ── Completion blocking: a parent cannot transition INTO a final column while
+        #    it still has incomplete subtasks. We use the *effective* target column —
+        #    the board_column from the request if present, otherwise the one the task
+        #    already has — so a PATCH that omits board_column still resolves to the
+        #    right target. A task that is already in a final column is never blocked
+        #    (unrelated edits stay allowed): only the transition open -> final counts.
+        if self.instance is not None:
+            board_column = attrs.get('board_column', serializers.empty)
+            if board_column is serializers.empty:
+                target_column = self.instance.board_column
+            else:
+                target_column = board_column
             already_final = bool(self.instance.board_column and self.instance.board_column.is_final)
-            if not already_final:
+            entering_final = bool(target_column and target_column.is_final) and not already_final
+            if entering_final:
                 open_subtasks = self.instance.subtasks.filter(completed_at__isnull=True).count()
                 if open_subtasks > 0:
                     raise serializers.ValidationError(

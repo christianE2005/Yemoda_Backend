@@ -151,7 +151,12 @@ def audit_submission(body: SubmissionAuditRequest, background_tasks: BackgroundT
     if not body.repo_url.strip():
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="repo_url es requerido.")
 
-    mode = body.processing_mode if body.processing_mode in ("normal", "batch") else "normal"
+    mode = body.processing_mode or "normal"  # absent/None -> default 'normal'
+    if mode not in ("normal", "batch"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="processing_mode debe ser 'normal' o 'batch'.",
+        )
 
     background_tasks.add_task(
         _run_audit,

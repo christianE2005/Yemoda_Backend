@@ -513,7 +513,17 @@ class Task(models.Model):
             )
         ]
 
-    def save(self, *args, **kwargs):
+    _NOT_LOADED = object()
+
+    @classmethod
+    def from_db(cls, db, field_names, values):
+        instance = super().from_db(db, field_names, values)
+        # Remember the persisted column so save() can detect real transitions
+        # and skip the redundant column lookup when board_column is unchanged.
+        instance._loaded_board_column_id = instance.board_column_id
+        return instance
+
+    def _sync_completed_at(self):
         from django.utils import timezone
         if self.board_column_id is not None:
             col = BoardColumn.objects.filter(pk=self.board_column_id).first()
@@ -524,7 +534,17 @@ class Task(models.Model):
                     self.completed_at = None
         else:
             self.completed_at = None
+
+    def save(self, *args, **kwargs):
+        # Only re-derive completed_at when board_column actually changed (or for
+        # a not-yet-persisted instance). This avoids an extra query/race on every
+        # save while preserving the original write semantics: when the column is
+        # unchanged, completed_at was already synced on the save that changed it.
+        loaded = getattr(self, "_loaded_board_column_id", self._NOT_LOADED)
+        if loaded is self._NOT_LOADED or self.board_column_id != loaded:
+            self._sync_completed_at()
         super().save(*args, **kwargs)
+        self._loaded_board_column_id = self.board_column_id
 
 
 class TaskAssignment(models.Model):

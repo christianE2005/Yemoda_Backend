@@ -130,11 +130,14 @@ def _build_system_message(context_type: str | None, context_data: dict | None) -
             preview = "\n".join(f"- {path}" for path in indexed_files[:200])
             suffix = "\n- ... (truncado)" if len(indexed_files) > 200 else ""
             extras.append(f"Índice de archivos del repositorio:\n{preview}{suffix}")
-    if context_data.get("warnings"):
+    if context_data.get("warnings") and isinstance(context_data["warnings"], list):
         warnings_text = "\n".join(
-            f"- [{w.get('type', 'warning')}] {w.get('message', '')}" for w in context_data["warnings"]
+            f"- [{w.get('type', 'warning')}] {w.get('message', '')}"
+            for w in context_data["warnings"]
+            if isinstance(w, dict)
         )
-        extras.append(f"Advertencias activas:\n{warnings_text}")
+        if warnings_text:
+            extras.append(f"Advertencias activas:\n{warnings_text}")
     if context_data.get("diff"):
         extras.append(f"Diff:\n```diff\n{context_data['diff']}\n```")
     if context_data.get("file_content"):
@@ -193,7 +196,9 @@ async def _call_yemoda(body: ChatRequest) -> dict:
     except anthropic_sdk.RateLimitError:
         raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Límite de uso del servicio de IA alcanzado. Intenta de nuevo en un momento.")
     except anthropic_sdk.APIStatusError as exc:
-        logger.error("Anthropic API error: %s", exc)
+        # Log only a sanitized summary (HTTP status + error class). The full exception can carry
+        # request/response bodies with sensitive detail, so it must not hit the logs.
+        logger.error("Anthropic API error: status=%s type=%s", getattr(exc, "status_code", "?"), type(exc).__name__)
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Error en el servicio de IA de Yemoda.")
 
     # Distinguish the chat surfaces (general / code_review / ai_fix) so each can be costed separately.
