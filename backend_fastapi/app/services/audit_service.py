@@ -55,7 +55,7 @@ _EXCLUDED_FILENAMES: frozenset[str] = frozenset({
 })
 
 _MAX_TARBALL_BYTES = 40 * 1024 * 1024          # hard cap on the streamed download (~40MB)
-_MAX_PER_FILE_CHARS = 20_000                   # per-file cap so one huge file can't dominate
+_MAX_PER_FILE_CHARS = 50_000                   # per-file cap (raised from 20k for fuller coverage of large files)
 _MAX_CHUNK_CHARS = 120_000                     # per-chunk cap on concatenated source sent to the model
 _MAX_FINDINGS = 50                             # cap on combined findings after reduce
 _BATCH_MAX_TOKENS = 4096                       # output cap per chunk request (normal + batch)
