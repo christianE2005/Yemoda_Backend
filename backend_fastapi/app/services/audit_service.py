@@ -310,10 +310,16 @@ def _chunk_char_len(chunk: list[tuple[str, str]]) -> int:
 
 
 def _coerce_score(value: Any) -> int:
-    """Clamp a model-provided score into 0..100, tolerating floats/strings/None."""
+    """Clamp a model-provided score into 0..100, tolerating floats/strings/None.
+
+    A non-numeric score (e.g. "N/A" or a dict) defaults to 0 — we keep scoring rather than
+    crash the whole audit on one malformed response — but we log it so model-output corruption
+    is surfaced instead of hidden.
+    """
     try:
         n = int(round(float(value)))
     except (TypeError, ValueError):
+        logger.warning("hackathon: non-numeric score %r coerced to 0", value)
         return 0
     return max(0, min(100, n))
 
