@@ -16,6 +16,7 @@ from app.core.database import SessionLocal
 from app.core.deps import require_internal_token
 from app.models.models import HackathonSubmission
 from app.services.audit_service import (
+    cleanup_findings,
     fetch_repo_source,
     finalize_batch,
     score_submission_normal,
@@ -115,6 +116,8 @@ def _run_audit(
                     result["findings"] = verify_findings_pass(files, result["findings"])
                 except Exception as exc:
                     logger.info("Audit: submission %s verify skipped: %s", submission_id, exc)
+            # Final cleanup: drop non-defect noise + merge duplicates (keep-on-failure, shrink-only).
+            result["findings"] = cleanup_findings(result["findings"])
             submission.status = "done"
             submission.score = result["score"]
             submission.score_breakdown = result["score_breakdown"]

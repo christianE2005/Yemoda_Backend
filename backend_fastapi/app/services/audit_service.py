@@ -721,6 +721,82 @@ def score_submission(files: dict[str, str], rubric: dict[str, int]) -> dict[str,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# CLEANUP — final pass: drop non-defects/noise + merge duplicates (one cheap call)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_CLEANUP_PROMPT = """\
+You are doing a FINAL cleanup of a code-review findings list before it is shown to a team. The list
+was produced by analyzing the repo in slices, so it may contain duplicates and items that are not
+real defects. Produce a cleaned list.
+
+REMOVE an entry if ANY of these is true:
+- It is NOT a concrete defect: style/naming/formatting, magic numbers, missing docs/tests, or a
+  "could be refactored/optimized/batched" / "consider ..." / "should ideally ..." preference.
+- Its OWN description admits it is fine: e.g. "this is correct", "is safe", "no real impact",
+  "but confusing", "unlikely", "theoretical", "for clarity", "for maintainability".
+- It asserts an ABSENCE ("missing", "not validated/handled", "no endpoint/test") — that cannot be a
+  verified defect from a static slice review.
+Then MERGE entries describing the SAME underlying issue into one (keep the highest severity, the
+clearest title, a combined description, the most relevant file).
+
+Rules:
+- KEEP every genuine, concrete defect. When UNSURE whether something is a real defect, KEEP it.
+- Do NOT invent new findings. Do NOT raise any severity.
+
+## Findings (1-based):
+{findings}
+
+Respond ONLY with STRICT JSON (the cleaned list; an empty list is valid if nothing is a real defect):
+{{"findings":[{{"category":"security|performance|robustness|correctness|maintainability|tdd","severity":"critical|high|medium|low","title":"<string>","file":"<path or empty>","description":"<1-2 sentences>"}}]}}
+"""
+
+
+def cleanup_findings(findings: list[dict]) -> list[dict]:
+    """Final pass over the WHOLE findings list (one cheap LLM call at temp 0): drop non-defects,
+    self-acknowledged-fine items, absence claims, and style noise; merge duplicates.
+
+    Guarded so it can only SHRINK/merge — never invent or escalate. On any call/parse failure, or a
+    result LONGER than the input, the original findings are returned unchanged; severities are
+    re-capped and can never exceed the worst input severity. An empty result is accepted (a slice
+    of all-noise legitimately cleans to nothing). No-op for an empty input.
+    """
+    if not findings:
+        return findings
+    listing = "\n".join(
+        f"{i}. [{f.get('severity', 'low')}] ({f.get('category', '')}) {f.get('title', '')}"
+        f" — file: {f.get('file') or 'n/a'} — {f.get('description', '')}"
+        for i, f in enumerate(findings, 1)
+    )
+    try:
+        text = generate_content(
+            _CLEANUP_PROMPT.format(findings=listing),
+            model_name=_AUDIT_MODEL,
+            json_mode=True,
+            label="hackathon_cleanup",
+            max_tokens=2048,
+            temperature=0,
+        )
+        parsed = _parse_model_json(text)
+        cleaned = _normalize_findings(parsed.get("findings") if isinstance(parsed, dict) else None)
+    except Exception:
+        return findings
+    # The pass may only shrink/merge. A list LONGER than the input means it misbehaved — keep original.
+    if len(cleaned) > len(findings):
+        return findings
+    # Anti-escalation: never produce a severity worse than the worst input.
+    worst_rank = min(
+        (_SEVERITY_ORDER.get(f.get("severity", "low"), 3) for f in findings), default=3
+    )
+    worst_sev = next((s for s, r in _SEVERITY_ORDER.items() if r == worst_rank), "low")
+    for finding in cleaned:
+        if _SEVERITY_ORDER.get(finding.get("severity", "low"), 3) < worst_rank:
+            finding["severity"] = worst_sev
+        _cap_finding_severity(finding)
+    cleaned.sort(key=lambda f: _SEVERITY_ORDER.get(f.get("severity", "low"), 3))
+    return cleaned[:_MAX_FINDINGS]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # BATCH (Anthropic Message Batches) — submit + finalize
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -853,4 +929,6 @@ def finalize_batch(
         except Exception as exc:
             logger.info("Batch verify skipped for %s: %s", batch_id, exc)
 
+    # Final cleanup: drop non-defect noise + merge duplicates (keep-on-failure, shrink-only).
+    result["findings"] = cleanup_findings(result["findings"])
     return result
