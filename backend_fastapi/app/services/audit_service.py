@@ -897,6 +897,26 @@ _FINDING_PENALTY: dict[str, float] = {
 }
 
 
+def _effective_category(category: str) -> str:
+    """The category a finding is scored under: itself if one of the six, else 'correctness' (so an
+    unknown/hallucinated category still lands in a real, visible bucket)."""
+    return category if category in CATEGORIES else "correctness"
+
+
+def _drop_unweighted_findings(findings: list[dict], rubric: dict[str, int]) -> list[dict]:
+    """Drop findings whose scoring category has rubric weight 0. A team that weights a dimension at 0
+    has explicitly chosen not to grade it, so those findings neither move the score (the weighted
+    average already excludes weight-0 categories) nor belong in the displayed list. No-op when the
+    rubric has no positive weights at all (score then falls back to a plain six-category average)."""
+    rubric = rubric or {}
+    if not any(_normalize_weight(w) > 0 for w in rubric.values()):
+        return findings
+    return [
+        f for f in findings
+        if _normalize_weight(rubric.get(_effective_category(f.get("category", "")), 0)) > 0
+    ]
+
+
 def score_from_findings(
     findings: list[dict],
     rubric: dict[str, int],
@@ -924,10 +944,7 @@ def score_from_findings(
     penalties: dict[str, float] = {cat: 0.0 for cat in CATEGORIES}
     for finding in findings or []:
         pen = _FINDING_PENALTY.get(finding.get("severity", "low"), _FINDING_PENALTY["low"])
-        cat = finding.get("category", "")
-        if cat not in penalties:
-            cat = "correctness"  # unknown/hallucinated category -> a real, visible bucket
-        penalties[cat] += pen
+        penalties[_effective_category(finding.get("category", ""))] += pen
 
     breakdown: dict[str, dict[str, int]] = {}
     for cat in CATEGORIES:
@@ -981,6 +998,9 @@ def finalize_result(result: dict[str, Any], rubric: dict[str, int]) -> dict[str,
     if result.get("findings") and not model_breakdown:
         logger.warning("hackathon: findings present but score_breakdown empty — score ceiling unbounded")
     findings = apply_noise_backstop(cleanup_findings(result.get("findings") or []))
+    # A category weighted 0 in the rubric isn't graded, so drop its findings entirely — they neither
+    # affect the score nor belong in the list (the displayed findings then match what's scored).
+    findings = _drop_unweighted_findings(findings, rubric or {})
     score, breakdown = score_from_findings(findings, rubric or {}, model_breakdown)
     result["findings"] = findings
     result["score"] = score
