@@ -490,6 +490,141 @@ def reduce_chunk_scores(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# VERIFY (high-fidelity adversarial re-judge of critical/high findings)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_VERIFY_MAX_FILES = 10                          # cap on file-groups we spend a call on
+_VERIFY_SEVERITIES: tuple[str, ...] = ("critical", "high")
+
+_VERIFY_PROMPT = """\
+You are a skeptical security/code reviewer. For EACH reported finding, decide using ONLY
+the source file shown whether it is genuinely valid at the stated severity. Default to downgrading or
+dropping when evidence is weak, hypothetical, or not actually present in this file.
+
+## FILE: {path}
+{code}
+
+## Reported findings (1-based):
+{findings}
+
+For each finding, return a verdict:
+- "keep": the finding is genuinely valid at its stated severity.
+- "downgrade": the issue is real but overstated — return a lower severity.
+- "drop": the issue is refuted, hypothetical, or not present in this file.
+
+Respond ONLY with STRICT JSON in EXACTLY this shape:
+{{"verdicts":[{{"index":<1-based int>,"verdict":"keep|downgrade|drop","severity":"critical|high|medium|low"}}]}}
+"""
+
+
+def build_verify_prompt(path: str, code: str, group: list[dict]) -> str:
+    """Build the adversarial verification prompt for one file's critical/high findings.
+
+    Embeds the source file and a numbered (1-based) list of the group's findings, and asks the
+    model to keep / downgrade / drop each one, justifying only from the shown source.
+    """
+    findings = "\n".join(
+        f"{i}. [{(f.get('severity') or '').strip()}] "
+        f"{(f.get('title') or '').strip()} — {(f.get('description') or '').strip()}"
+        for i, f in enumerate(group, start=1)
+    )
+    return _VERIFY_PROMPT.format(path=path, code=code, findings=findings)
+
+
+def _downgrade_severity(current: str, target: str) -> str:
+    """Return the new severity for a 'downgrade' verdict.
+
+    Use `target` if it's strictly less severe than `current` (per _SEVERITY_ORDER); otherwise
+    drop `current` exactly one level. Never goes below "low".
+    """
+    cur_rank = _SEVERITY_ORDER.get(current, 3)
+    tgt_rank = _SEVERITY_ORDER.get(target, None)
+    if tgt_rank is not None and tgt_rank > cur_rank:
+        return target
+    new_rank = min(cur_rank + 1, _SEVERITY_ORDER["low"])
+    for sev, rank in _SEVERITY_ORDER.items():
+        if rank == new_rank:
+            return sev
+    return "low"
+
+
+def verify_findings_pass(files: dict[str, str], findings: list[dict]) -> list[dict]:
+    """Adversarially re-judge critical/high findings against their cited source file.
+
+    Splits findings into to_verify (severity in _VERIFY_SEVERITIES) and passthrough (the rest).
+    Groups to_verify by cited file and, for up to _VERIFY_MAX_FILES groups with available source,
+    asks the model to keep/downgrade/drop each finding. low/medium findings pass through untouched;
+    numeric scores are never changed. Returns passthrough + kept verified findings, severity-sorted
+    and capped at _MAX_FINDINGS.
+    """
+    to_verify: list[dict] = []
+    passthrough: list[dict] = []
+    for finding in findings or []:
+        if (finding.get("severity") or "") in _VERIFY_SEVERITIES:
+            to_verify.append(finding)
+        else:
+            passthrough.append(finding)
+
+    if not to_verify:
+        return findings
+
+    # Group the critical/high findings by their cited file (deterministic order).
+    groups: dict[str, list[dict]] = {}
+    for finding in to_verify:
+        path = finding.get("file") or ""
+        groups.setdefault(path, []).append(finding)
+
+    kept: list[dict] = []
+    for i, (path, group) in enumerate(groups.items()):
+        # Beyond the cap, or no source to judge against -> keep the group as-is (can't verify).
+        if i >= _VERIFY_MAX_FILES or not files.get(path):
+            kept.extend(group)
+            continue
+
+        try:
+            text = generate_content(
+                build_verify_prompt(path, files[path], group),
+                json_mode=True,
+                label="hackathon_verify",
+                max_tokens=2048,
+            )
+            parsed = _parse_model_json(text)
+        except Exception:
+            # On call/parse failure, keep the group as-is — verify never loses real findings.
+            kept.extend(group)
+            continue
+
+        verdicts: dict[int, dict[str, Any]] = {}
+        for v in (parsed.get("verdicts") if isinstance(parsed, dict) else None) or []:
+            if not isinstance(v, dict):
+                continue
+            try:
+                verdicts[int(v.get("index"))] = v
+            except (TypeError, ValueError):
+                continue
+
+        for idx, finding in enumerate(group, start=1):
+            verdict = verdicts.get(idx)
+            if verdict is not None:
+                decision = str(verdict.get("verdict", "")).strip().lower()
+                if decision == "drop":
+                    continue
+                if decision == "downgrade":
+                    finding["severity"] = _downgrade_severity(
+                        finding.get("severity", "low"),
+                        str(verdict.get("severity", "")).strip().lower(),
+                    )
+                # "keep" (or anything else) -> unchanged.
+            # verdict missing -> finding unchanged. Re-apply the per-category ceiling either way.
+            kept.append(_cap_finding_severity(finding))
+
+    combined = passthrough + kept
+    return sorted(
+        combined, key=lambda f: _SEVERITY_ORDER.get(f.get("severity", "low"), 3)
+    )[:_MAX_FINDINGS]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # MAP driver — normal (synchronous loop)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -529,13 +664,20 @@ def score_submission(files: dict[str, str], rubric: dict[str, int]) -> dict[str,
 # ─────────────────────────────────────────────────────────────────────────────
 
 def submit_batch(
-    files: dict[str, str], rubric: dict[str, int]
+    files: dict[str, str],
+    rubric: dict[str, int],
+    *,
+    verify: bool = False,
+    repo_url: str = "",
+    ref: str = "main",
 ) -> tuple[str | None, dict[str, Any]]:
     """Submit one Anthropic Message Batch request per chunk and return (batch_id, batch_meta).
 
-    batch_meta = {"n_chunks":N, "chunks":[{"idx":i,"char_len":len}], "rubric":rubric}.
-    Uses the SAME model string as core/anthropic.generate_content. If there are no files,
-    returns (None, meta) with n_chunks=0 so the caller can short-circuit.
+    batch_meta = {"n_chunks":N, "chunks":[{"idx":i,"char_len":len}], "rubric":rubric,
+                  "verify":bool, "repo_url":str, "ref":str}.
+    The verify/repo_url/ref keys let finalize_batch re-fetch the source and run the high-fidelity
+    verification pass later. Uses the SAME model string as core/anthropic.generate_content. If there
+    are no files, returns (None, meta) with n_chunks=0 so the caller can short-circuit.
     """
     import anthropic
     from anthropic.types.message_create_params import MessageCreateParamsNonStreaming
@@ -548,6 +690,9 @@ def submit_batch(
         "n_chunks": len(chunks),
         "chunks": meta_chunks,
         "rubric": rubric,
+        "verify": bool(verify),
+        "repo_url": repo_url,
+        "ref": ref,
     }
     if not chunks:
         return None, batch_meta
@@ -633,4 +778,17 @@ def finalize_batch(
         chunk_results.append(parsed_by_idx.get(idx, {"categories": {}, "findings": []}))
         weights.append(char_lens.get(idx, 1))
 
-    return reduce_chunk_scores(chunk_results, weights, rubric)
+    result = reduce_chunk_scores(chunk_results, weights, rubric)
+
+    # High-fidelity verification: re-fetch the source and adversarially re-judge critical/high
+    # findings. Scores are untouched; on any fetch/verify failure we keep the reduced findings.
+    if batch_meta.get("verify"):
+        try:
+            files = fetch_repo_source(
+                batch_meta.get("repo_url", ""), batch_meta.get("ref", "main")
+            )
+            result["findings"] = verify_findings_pass(files, result["findings"])
+        except Exception as exc:
+            logger.info("Batch verify skipped for %s: %s", batch_id, exc)
+
+    return result

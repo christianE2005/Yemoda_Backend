@@ -3657,7 +3657,8 @@ def _drain_pending_reviews_async(project_id: int) -> None:
 
 
 def _trigger_hackathon_audit_async(
-    submission_id: int, repo_url: str, ref: str, rubric: dict, processing_mode: str = "normal"
+    submission_id: int, repo_url: str, ref: str, rubric: dict,
+    processing_mode: str = "normal", verify_findings: bool = False,
 ) -> None:
     """Best-effort: ask the FastAPI auditor to score a submission.
 
@@ -3678,6 +3679,7 @@ def _trigger_hackathon_audit_async(
                 "ref": ref,
                 "rubric": rubric,
                 "processing_mode": processing_mode,
+                "verify_findings": verify_findings,
             },
             headers={
                 "Content-Type": "application/json",
@@ -4523,6 +4525,8 @@ class HackathonViewSet(viewsets.ModelViewSet):
         if mode not in ("normal", "batch"):
             raise ValidationError({"processing_mode": "Debe ser 'normal' o 'batch'."})
 
+        verify = bool(request.data.get("verify_findings") or False)
+
         teams_raw = request.data.get("expected_teams")
         if teams_raw in (None, ""):
             expected_teams = None
@@ -4534,13 +4538,16 @@ class HackathonViewSet(viewsets.ModelViewSet):
             if expected_teams < 0:
                 raise ValidationError({"expected_teams": "Debe ser un entero >= 0 o nulo."})
 
+        # The two mode cards are computed at the chosen verify flag so they stay comparable
+        # for the selected fidelity.
         return Response({
             "processing_mode": mode,
+            "verify_findings": verify,
             "expected_teams": expected_teams,
-            "normal_price_per_team": round(hackathon_price_per_team("normal"), 2),
-            "batch_price_per_team": round(hackathon_price_per_team("batch"), 2),
-            "price_per_team": round(hackathon_price_per_team(mode), 2),
-            "estimated_total": hackathon_estimated_total(mode, expected_teams),
+            "normal_price_per_team": round(hackathon_price_per_team("normal", verify), 2),
+            "batch_price_per_team": round(hackathon_price_per_team("batch", verify), 2),
+            "price_per_team": round(hackathon_price_per_team(mode, verify), 2),
+            "estimated_total": hackathon_estimated_total(mode, verify, expected_teams),
         })
 
     def _get_owned_hackathon(self, pk):
@@ -4573,6 +4580,7 @@ class HackathonViewSet(viewsets.ModelViewSet):
             ref=submission.ref,
             rubric=hackathon.rubric or {},
             processing_mode=submission.hackathon.processing_mode,
+            verify_findings=submission.hackathon.verify_findings,
         )
         return Response(
             HackathonSubmissionSerializer(submission).data,

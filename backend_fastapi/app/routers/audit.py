@@ -20,6 +20,7 @@ from app.services.audit_service import (
     finalize_batch,
     score_submission_normal,
     submit_batch,
+    verify_findings_pass,
 )
 
 logger = logging.getLogger(__name__)
@@ -35,10 +36,16 @@ class SubmissionAuditRequest(BaseModel):
     ref: str = Field(default="main", max_length=255)
     rubric: dict[str, int] = Field(default_factory=dict)
     processing_mode: str = Field(default="normal", max_length=10)  # 'normal' | 'batch'
+    verify_findings: bool = False  # high-fidelity: adversarially re-judge critical/high findings
 
 
 def _run_audit(
-    submission_id: int, repo_url: str, ref: str, rubric: dict[str, int], processing_mode: str
+    submission_id: int,
+    repo_url: str,
+    ref: str,
+    rubric: dict[str, int],
+    processing_mode: str,
+    verify: bool,
 ) -> None:
     """Background worker: fetch the repo, then either score it now (normal) or submit a batch.
 
@@ -70,7 +77,9 @@ def _run_audit(
             logger.info("Audit: submission %s fetched %d source file(s)", submission_id, len(files))
 
             if processing_mode == "batch":
-                batch_id, batch_meta = submit_batch(files, rubric or {})
+                batch_id, batch_meta = submit_batch(
+                    files, rubric or {}, verify=verify, repo_url=repo_url, ref=ref
+                )
                 if batch_id is None:
                     # No analyzable files -> nothing to batch; finish now with a deterministic
                     # empty result so the row never gets stuck in batch_pending.
@@ -99,6 +108,13 @@ def _run_audit(
                 return
 
             result = score_submission_normal(files, rubric or {})
+            if verify:
+                # High-fidelity: adversarially re-judge critical/high findings against their
+                # cited source. Scores are untouched; on failure keep the result as-is.
+                try:
+                    result["findings"] = verify_findings_pass(files, result["findings"])
+                except Exception as exc:
+                    logger.info("Audit: submission %s verify skipped: %s", submission_id, exc)
             submission.status = "done"
             submission.score = result["score"]
             submission.score_breakdown = result["score_breakdown"]
@@ -138,6 +154,7 @@ def audit_submission(body: SubmissionAuditRequest, background_tasks: BackgroundT
         body.ref or "main",
         body.rubric or {},
         mode,
+        body.verify_findings,
     )
 
     return {"detail": "queued", "submission_id": body.submission_id, "processing_mode": mode}

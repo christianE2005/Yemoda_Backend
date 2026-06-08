@@ -1,4 +1,16 @@
-from sqlalchemy import JSON, BigInteger, Date, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import (
+    JSON,
+    BigInteger,
+    Boolean,
+    Date,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -333,6 +345,11 @@ class Hackathon(Base):
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="open")
     processing_mode: Mapped[str] = mapped_column(String(10), nullable=False, default="normal")
     expected_teams: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # High-fidelity verification flag. Mirrors Django's column for tidiness; FastAPI gets the
+    # flag via the audit request payload, not by reading this row.
+    verify_findings: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
     created_at: Mapped[DateTime] = mapped_column(DateTime, server_default=func.now())
 
 

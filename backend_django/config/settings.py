@@ -252,6 +252,7 @@ AI_METERING_ENFORCE = os.getenv("AI_METERING_ENFORCE", "true").lower() == "true"
 # (cheaper async Anthropic Message Batches). See serializers/views for the price formula.
 HACKATHON_PRICE_PER_TEAM = float(os.getenv("HACKATHON_PRICE_PER_TEAM", "1.50"))   # charge per team, normal mode
 HACKATHON_BATCH_DISCOUNT = float(os.getenv("HACKATHON_BATCH_DISCOUNT", "0.5"))    # batch multiplier (-> $0.75/team)
+HACKATHON_VERIFY_MULTIPLIER = float(os.getenv("HACKATHON_VERIFY_MULTIPLIER", "1.5"))  # high-fidelity (re-judge) surcharge
 
 # Stripe
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")

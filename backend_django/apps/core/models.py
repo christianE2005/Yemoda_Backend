@@ -901,6 +901,9 @@ class Hackathon(models.Model):
     )
     # Number of teams the judge expects, used only for the price quote.
     expected_teams = models.IntegerField(null=True, blank=True)
+    # High-fidelity mode: adversarially re-judge critical/high findings (drop refuted ones,
+    # downgrade overstated ones) after scoring. Costs more (verify multiplier); scores unchanged.
+    verify_findings = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
