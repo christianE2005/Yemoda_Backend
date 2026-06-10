@@ -23,11 +23,12 @@ import os
 logger = logging.getLogger("ai.usage")
 
 # USD per 1,000,000 tokens, as (input, output). UPDATE to match anthropic.com/pricing.
+# Only currently-served models: claude-haiku-4-5 is the product-wide default; the others stay
+# listed so an env override (HACKATHON_VERIFY_MODEL etc.) is still costed correctly.
 _PRICING: dict[str, tuple[float, float]] = {
     "claude-haiku-4-5": (1.0, 5.0),
-    "claude-3-5-sonnet-20241022": (3.0, 15.0),
-    "claude-3-7-sonnet-20250219": (3.0, 15.0),
-    "claude-opus-4-5": (5.0, 25.0),
+    "claude-sonnet-4-6": (3.0, 15.0),
+    "claude-opus-4-6": (5.0, 25.0),
 }
 # Fallback if an unknown model is used (assume Haiku-tier so we don't under-count badly).
 _DEFAULT_PRICE: tuple[float, float] = (1.0, 5.0)

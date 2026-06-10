@@ -41,7 +41,10 @@ class TrainResponse(BaseModel):
     status: str
     reason: str | None = None
     samples: int | None = None
+    # R² on the TRAINING set (optimistic with few samples — see cv_mse for the honest metric).
     r2_score: float | None = None
+    # Best mean cross-validated MSE (days²) found by ElasticNetCV — the generalization signal.
+    cv_mse: float | None = None
     alpha: float | None = None
     l1_ratio: float | None = None
 
