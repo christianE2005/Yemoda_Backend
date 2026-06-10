@@ -34,12 +34,11 @@ logger = logging.getLogger(__name__)
 _AUDIT_MODEL = os.getenv("HACKATHON_AI_MODEL", "claude-haiku-4-5")
 
 # Model used by the HIGH-FIDELITY verify pass (adversarial re-read of critical/high/medium findings).
-# Defaults to Sonnet 4.6 ON PURPOSE: the refuter must NOT share the scoring model's blind spots —
-# Haiku judging its own output re-makes the same misreads, so a stronger model is what actually drops
-# false positives (e.g. "missing timeout" when a timeout already exists). Only runs in high-fidelity
-# (the premium tier) and only on ≤_VERIFY_MAX_FILES file-groups, so the extra cost is bounded. Set
-# HACKATHON_VERIFY_MODEL=claude-haiku-4-5 to keep verify on Haiku.
-_VERIFY_MODEL = os.getenv("HACKATHON_VERIFY_MODEL", "claude-sonnet-4-6")
+# Defaults to Haiku 4.5: every AI call in the product runs on the same cheap model so spend stays
+# flat and predictable. Trade-off to know about: a same-model refuter shares the scorer's blind
+# spots, so verify drops fewer false positives than a stronger model would. If verify quality ever
+# matters more than cost, set HACKATHON_VERIFY_MODEL=claude-sonnet-4-6 (no code change needed).
+_VERIFY_MODEL = os.getenv("HACKATHON_VERIFY_MODEL", "claude-haiku-4-5")
 
 # Fixed categories scored by the AI (the rubric only weights them).
 CATEGORIES: tuple[str, ...] = (

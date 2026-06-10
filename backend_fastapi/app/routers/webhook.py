@@ -106,6 +106,25 @@ def _active_warnings_by_task(db: Session, task_ids: list[int]) -> dict[int, list
     return result
 
 
+def _queue_pending_review(db: Session, project_id: int, push_id: int, trigger: str) -> None:
+    """Queue a push for a later review retry, skipping if it's already queued.
+
+    The exists-check keeps webhook redeliveries (GitHub retries the same push) from piling
+    up duplicate pending rows that would each consume a review unit when drained.
+    """
+    try:
+        already = (
+            db.query(PendingAiReview)
+            .filter(PendingAiReview.id_project == project_id, PendingAiReview.id_push == push_id)
+            .first()
+        )
+        if already is None:
+            db.add(PendingAiReview(id_project=project_id, id_push=push_id, trigger=trigger))
+            db.commit()
+    except Exception:
+        db.rollback()
+
+
 def _analyze_and_apply(
     db: Session,
     project,
@@ -126,11 +145,12 @@ def _analyze_and_apply(
 
     Returns one of _REVIEW_DONE / _REVIEW_NO_QUOTA / _REVIEW_FAILED.
     """
-    # Quota: count this review against the project's monthly allowance. Pre-check only here;
-    # the unit is consumed AFTER a successful model call so a failure doesn't burn quota. If
-    # exhausted, queue the push for later retry (automatic trigger) or skip (manual trigger).
+    # Quota: atomically gate AND reserve one review unit (same pattern as the chat router) so
+    # two concurrent pushes can't both slip through the last available unit. If the model call
+    # fails the unit is refunded below, so a failure still doesn't burn quota. When exhausted,
+    # queue the push for later retry (automatic trigger) or skip (manual trigger).
     period = metering.current_period()
-    allowed, used, q = metering.has_quota(db, project.id_project, "reviews", period=period)
+    allowed, used, q = metering.check_and_consume(db, project.id_project, "reviews")
     if not allowed:
         will_queue = trigger == "push" and allow_queue and push_event is not None
         logger.info(
@@ -138,11 +158,7 @@ def _analyze_and_apply(
             project.id_project, used, q, "queuing push" if will_queue else "skipping",
         )
         if will_queue:
-            try:
-                db.add(PendingAiReview(id_project=project.id_project, id_push=push_event.id_push, trigger=trigger))
-                db.commit()
-            except Exception:
-                db.rollback()
+            _queue_pending_review(db, project.id_project, push_event.id_push, trigger)
         return _REVIEW_NO_QUOTA
 
     stories = build_story_tree(analyze_tasks)
@@ -174,11 +190,13 @@ def _analyze_and_apply(
         logger.info("Analysis complete for project %s (%s): %d matches", project.id_project, trigger, len(analysis.get("matches", [])))
     except Exception as exc:
         logger.error("Claude analysis failed: %s", exc)
-        # Model failed: do NOT consume quota and signal failure so a queued review is kept for retry.
+        # Model failed: give back the reserved unit and queue the push for a later retry
+        # (previously a transient model error silently lost the analysis forever). Drains pass
+        # allow_queue=False, so a failing queued review is kept by the caller, not re-queued.
+        metering.refund(db, project.id_project, "reviews", period=period)
+        if trigger == "push" and allow_queue and push_event is not None:
+            _queue_pending_review(db, project.id_project, push_event.id_push, trigger)
         return _REVIEW_FAILED
-
-    # The model call succeeded — count this review against the project's monthly allowance.
-    metering.consume(db, project.id_project, "reviews", period=period)
 
     review_column = get_review_column(db, project.id_project)
     review_column_id = review_column.id_column if review_column else None
@@ -626,32 +644,42 @@ async def review_task_webhook(
     return {"detail": "Revisión de tarea encolada. Analizando con IA en segundo plano...", "task_id": int(task_id)}
 
 
+def _process_drain_pending(explicit_project_id: int | None) -> None:
+    # Plain `def`: runs in the threadpool. Each drained review is a multi-second Claude call,
+    # so doing this inline in the request handler held an HTTP worker (and risked the proxy
+    # timeout) for the whole loop.
+    db: Session = SessionLocal()
+    try:
+        if explicit_project_id:
+            project_ids = [int(explicit_project_id)]
+        else:
+            project_ids = [row[0] for row in db.query(PendingAiReview.id_project).distinct().all()]
+        total = 0
+        for pid in project_ids:
+            total += drain_pending_reviews(db, pid)
+        logger.info("Drain finished: %d review(s) across %d project(s)", total, len(project_ids))
+    except Exception as exc:
+        logger.exception("Drain background task failed: %s", exc)
+    finally:
+        db.close()
+
+
 @router.post("/drain-pending/", dependencies=[Depends(require_internal_token)])
 @limiter.limit("30/minute")
 async def drain_pending_webhook(
     request: Request,
+    background_tasks: BackgroundTasks,
 ):
-    """Retry queued push reviews. Server-to-server: called by Django on plan upgrade or a
-    monthly-reset cron. Optional body {"project_id": N} limits it to one project.
+    """Retry queued push reviews in the background. Server-to-server: called by Django on plan
+    upgrade or a monthly-reset cron. Optional body {"project_id": N} limits it to one project.
     Auth: the shared internal token (FASTAPI_INTERNAL_TOKEN) via require_internal_token."""
     try:
         payload = await request.json()
     except json.JSONDecodeError:
         payload = {}
 
-    total = 0
-    project_ids: list[int] = []
-    db: Session = SessionLocal()
-    try:
-        explicit = payload.get("project_id") if isinstance(payload, dict) else None
-        if explicit:
-            project_ids = [int(explicit)]
-        else:
-            project_ids = [row[0] for row in db.query(PendingAiReview.id_project).distinct().all()]
-        for pid in project_ids:
-            total += drain_pending_reviews(db, pid)
-    finally:
-        db.close()
+    explicit = payload.get("project_id") if isinstance(payload, dict) else None
+    background_tasks.add_task(_process_drain_pending, int(explicit) if explicit else None)
 
-    return {"detail": "Drain complete.", "drained": total, "projects": len(project_ids)}
+    return {"detail": "Drain encolado. Procesando en segundo plano..."}
 

@@ -26,12 +26,13 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/chat", tags=["chat"], dependencies=[Depends(require_internal_token)])
 limiter = Limiter(key_func=get_remote_address)
 
-# Anthropic models available server-side
+# Anthropic models available server-side. Haiku 4.5 only, by deliberate choice: every AI
+# surface of the product (push reviews, hackathon audit, chat, ai-fix) runs on the same
+# cheap, fast model so cost stays predictable. The previous list also offered
+# claude-3-5-sonnet-20241022 and claude-3-7-sonnet-20250219, both RETIRED by the API
+# (calls 404) — selecting them surfaced as a 502 to the user.
 _ANTHROPIC_MODELS = {
     "claude-haiku-4-5",
-    "claude-3-5-sonnet-20241022",
-    "claude-3-7-sonnet-20250219",
-    "claude-opus-4-5",
 }
 _ANTHROPIC_DEFAULT_MODEL = "claude-haiku-4-5"
 
@@ -171,6 +172,12 @@ async def _call_yemoda(body: ChatRequest) -> dict:
             detail=f"Modelo '{model}' no disponible. Opciones: {sorted(_ANTHROPIC_MODELS)}",
         )
 
+    # ai_fix must emit a parseable unified diff — sampling variety only hurts there, so when
+    # the client didn't explicitly pick a temperature, pin it to 0 for that context.
+    temperature = body.temperature
+    if body.context_type == "ai_fix" and "temperature" not in body.model_fields_set:
+        temperature = 0.0
+
     messages = [m.model_dump() for m in body.messages]
 
     # Anthropic separates the system prompt from the messages array
@@ -189,7 +196,7 @@ async def _call_yemoda(body: ChatRequest) -> dict:
             max_tokens=body.max_tokens,
             system=system_content,
             messages=anthropic_messages,
-            temperature=body.temperature,
+            temperature=temperature,
         )
     except anthropic_sdk.AuthenticationError:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Error de autenticación con la IA de Yemoda.")

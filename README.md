@@ -10,7 +10,7 @@ Monorepo con dos backends en Python para una plataforma de gestión de proyectos
 | Capa | Tecnología |
 |------|-----------|
 | Backend principal | Django 5 + Django REST Framework 3.15 |
-| Backend IA | FastAPI 0.111 + Anthropic Claude |
+| Backend IA | FastAPI 0.111 + Anthropic Claude (`claude-haiku-4-5` en todas las llamadas) |
 | Base de datos | PostgreSQL (Aiven) — compartida entre ambos backends |
 | Autenticación | JWT personalizado (Bearer token) |
 | Documentación API | drf-spectacular (Swagger UI en `/api/docs/`) |
@@ -115,8 +115,10 @@ Swagger UI: `http://127.0.0.1:8001/api/docs/`
 | `GITHUB_APP_CLIENT_SECRET` | Client Secret de la GitHub App |
 | `GITHUB_APP_OAUTH_CALLBACK_URL` | URL de callback OAuth |
 | `GITHUB_APP_PRIVATE_KEY` | Llave privada RSA de la GitHub App (con saltos de línea reales) |
-| `GITHUB_APP_WEBHOOK_SECRET` | **Requerido.** Valida la firma HMAC-SHA256 de los webhooks (**fail-closed**: sin él, los webhooks se rechazan) y actúa como token interno compartido Django↔FastAPI. |
+| `GITHUB_APP_WEBHOOK_SECRET` | **Requerido.** Valida la firma HMAC-SHA256 de los webhooks (**fail-closed**: sin él, los webhooks se rechazan). |
 | `GITHUB_APP_WEBHOOK_TARGET_URL` | URL del FastAPI que recibe los webhooks reenviados |
+| `FASTAPI_CHAT_BASE_URL` | Base URL del servicio FastAPI (chat, ai-review, predicciones ML, auditoría) |
+| `FASTAPI_INTERNAL_TOKEN` | **Requerido.** Secreto compartido Django↔FastAPI enviado como header `X-Internal-Token` en todas las llamadas server-to-server. Debe ser idéntico en ambos servicios. |
 
 ### Autenticación
 
@@ -169,6 +171,7 @@ El JWT contiene: `user_id`, `email`, `username`, `is_admin`, `system_role_id`.
 
 | Método | Endpoint | Auth | Descripción |
 |--------|----------|------|-------------|
+| GET | `/api/projects/{project_id}/risk/` | ✅ Miembro | Predicción ML de riesgo de retraso (proxy al servicio FastAPI) |
 | GET | `/api/projects/{project_id}/members/` | ✅ | Lista los miembros del proyecto |
 | POST | `/api/projects/{project_id}/members/` | ✅ | Añade usuario al proyecto (también como colaborador en GitHub si hay repos vinculados) |
 | GET | `/api/projects/{project_id}/repos/` | ✅ | Lista los repositorios vinculados al proyecto |
@@ -415,10 +418,13 @@ Docs: `http://127.0.0.1:8002/docs`
 | Variable | Descripción |
 |----------|-------------|
 | `FASTAPI_DATABASE_URL` | URL completa de PostgreSQL (`postgresql+psycopg2://...`) |
-| `ANTHROPIC_API_KEY` | API key de Anthropic (Claude) |
+| `ANTHROPIC_API_KEY` | API key de Anthropic (Claude). Todas las llamadas usan `claude-haiku-4-5` por defecto (reviews, auditoría, verify, chat, ai-fix). |
+| `FASTAPI_INTERNAL_TOKEN` | **Requerido.** Secreto compartido exigido como header `X-Internal-Token` en `/chat/*`, `/predictions/*`, `/audit/*`, `/webhook/review-task/` y `/webhook/drain-pending/`. Debe coincidir con el valor configurado en Django (fail-closed: sin él, esos endpoints rechazan todo con 401). |
 | `GITHUB_APP_ID` | ID de la GitHub App (mismo que Django) |
 | `GITHUB_APP_PRIVATE_KEY` | Llave privada RSA de la GitHub App |
-| `GITHUB_APP_WEBHOOK_SECRET` | **Requerido.** Valida firmas HMAC-SHA256 (fail-closed) y se exige como header `X-Internal-Token` en `/webhook/review-task/` y `/predictions/*` (endpoints server-to-server). |
+| `GITHUB_APP_WEBHOOK_SECRET` | **Requerido.** Valida firmas HMAC-SHA256 de los webhooks de GitHub (fail-closed). |
+| `HACKATHON_AI_MODEL` | Modelo del scoring de hackathons (default `claude-haiku-4-5`) |
+| `HACKATHON_VERIFY_MODEL` | Modelo del verify de alta fidelidad (default `claude-haiku-4-5`; `claude-sonnet-4-6` mejora la tasa de falsos positivos a ~3× el coste) |
 
 ### Endpoints FastAPI
 
@@ -505,16 +511,29 @@ Respuesta:
 
 | Campo | Descripción |
 |-------|-------------|
-| `at_risk` | `true` si el proyecto tiene riesgo de atraso |
-| `confidence` | Confianza del modelo (0–1). `null` si no hay modelo entrenado (usa burndown matemático) |
+| `at_risk` | `true` si el retraso previsto supera la banda de gracia de **2 días** (un retraso de 1-2 días está dentro del error del modelo y no dispara alarma) |
+| `confidence` | Heurística 0–1 basada en la distancia a la frontera de decisión (no es una probabilidad calibrada). `null` si no hay modelo entrenado (usa burndown matemático) |
 | `model_used` | `"elasticnet"` o `"rule_based_burndown"` (fallback con < 3 proyectos completados) |
 | `days_delay_estimate` | Días estimados de retraso (0 si está a tiempo) |
+
+> Requiere que el proyecto tenga tareas **y** `end_date`; sin fecha de entrega responde 404 (no hay retraso que predecir).
 
 > Mientras `scrum_number` sea `NULL` en las tareas, cada tarea vale **1 punto** (`COALESCE`).
 
 #### `POST /predictions/train/`
 
-Reentrena el modelo bajo demanda. Requiere al menos **3 proyectos** con `status='closed'` y tareas completadas. El modelo se persiste en `backend_fastapi/app/ml_models/` con `joblib`.
+Reentrena el modelo bajo demanda. Requiere al menos **3 proyectos** con `status='Finished'` (el estado real de Django; `Cancelled`/`Retired` se excluyen porque su fecha de cierre no refleja un retraso de entrega) y tareas completadas. El modelo se persiste en `backend_fastapi/app/ml_models/` con `joblib` (escritura atómica).
+
+La respuesta incluye `r2_score` (R² **sobre el set de entrenamiento** — optimista con pocas muestras) y `cv_mse` (mejor MSE medio de validación cruzada, en días² — la métrica honesta de generalización).
+
+El reentrenamiento también se dispara automáticamente:
+
+- **Al arrancar el FastAPI** si los archivos del modelo no existen (el filesystem de Railway es efímero — sin esto, cada deploy degradaba silenciosamente al fallback).
+- **Desde Django** cuando un proyecto pasa a `Finished` (nueva muestra de entrenamiento), de forma best-effort.
+
+#### `GET /api/projects/{id}/risk/` (Django)
+
+Superficie pública de la predicción: Django valida la **membresía del proyecto** y hace proxy a `/predictions/project-risk/` con el token interno. Responde `400 not_predictable` si el proyecto no tiene tareas o no tiene `end_date`.
 
 ---
 
@@ -551,7 +570,7 @@ Controles aplicados (auditoría de seguridad — críticos, altos, medios y bajo
 
 ### Webhooks, servicios internos y red
 - Webhooks de GitHub validados con HMAC-SHA256 en Django **y** FastAPI, **fail-closed**: si falta `GITHUB_APP_WEBHOOK_SECRET`, se rechazan (antes se aceptaban sin firma).
-- Endpoints server-to-server de FastAPI (`/webhook/review-task/`, `/predictions/*`) exigen `X-Internal-Token` == `GITHUB_APP_WEBHOOK_SECRET`.
+- Endpoints server-to-server de FastAPI (`/chat/*`, `/predictions/*`, `/audit/*`, `/webhook/review-task/`, `/webhook/drain-pending/`) exigen `X-Internal-Token` == `FASTAPI_INTERNAL_TOKEN` (secreto dedicado, fail-closed; ya no se reutiliza el webhook secret).
 - El webhook del repo se registra siempre contra `GITHUB_APP_WEBHOOK_TARGET_URL` del servidor (se ignora cualquier `webhook_url` del cliente).
 - **Pendiente (infra)**: el host de FastAPI no debe ser accesible directo desde internet — `/chat/*` lo alcanza el navegador vía gateway/Django; aíslalo o valida el JWT del usuario ahí.
 
