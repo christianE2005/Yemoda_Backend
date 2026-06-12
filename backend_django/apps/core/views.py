@@ -539,6 +539,19 @@ class UserAccountViewSet(viewsets.ModelViewSet):
             raise PermissionDenied("Solo puedes editar tu propio perfil.")
         serializer.save()
 
+    @extend_schema(responses={200: UserAccountSerializer}, tags=["user-accounts"], summary="Cuenta del usuario autenticado")
+    @action(detail=False, methods=['get'], url_path='me', permission_classes=[IsAuthenticated])
+    def me(self, request):
+        """Return the authenticated user's own account.
+
+        The router maps detail routes as /user-accounts/<pk>/, so without this
+        explicit detail=False action a request to /user-accounts/me/ is treated
+        as a retrieve with pk="me" and 404s. The OAuth/Google sign-in flow calls
+        this right after issuing the token to resolve identity and role.
+        """
+        serializer = self.get_serializer(request.user)
+        return Response(serializer.data)
+
 
 class ProjectViewSet(viewsets.ModelViewSet):
     queryset = Project.objects.all()
