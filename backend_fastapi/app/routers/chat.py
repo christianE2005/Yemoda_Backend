@@ -202,11 +202,38 @@ async def _call_yemoda(body: ChatRequest) -> dict:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Error de autenticación con la IA de Yemoda.")
     except anthropic_sdk.RateLimitError:
         raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Límite de uso del servicio de IA alcanzado. Intenta de nuevo en un momento.")
+    except anthropic_sdk.BadRequestError as exc:
+        # Almost always a too-long prompt: the ai_fix/code_review context (diff + file content)
+        # overflowed the model's context window. Surface a clear, actionable 413 instead of a
+        # blanket 502 so the client can tell the user to trim the file/selection.
+        request_id = getattr(exc, "request_id", None)
+        logger.error("Anthropic bad request: type=%s request_id=%s", type(exc).__name__, request_id)
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail="El contenido enviado a la IA es demasiado grande (archivo o diff). Reduce la selección e inténtalo de nuevo.",
+        )
+    except anthropic_sdk.OverloadedError:
+        # 529: Anthropic is temporarily overloaded. This is transient and retriable — return 503
+        # (not a scary 502) so the client can retry/back off instead of treating it as a hard error.
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="El servicio de IA está saturado en este momento. Espera unos segundos e inténtalo de nuevo.",
+        )
     except anthropic_sdk.APIStatusError as exc:
-        # Log only a sanitized summary (HTTP status + error class). The full exception can carry
-        # request/response bodies with sensitive detail, so it must not hit the logs.
-        logger.error("Anthropic API error: status=%s type=%s", getattr(exc, "status_code", "?"), type(exc).__name__)
+        # Any other upstream status. Log a sanitized summary (HTTP status + error class + request id
+        # for tracing with Anthropic) — never the full exception, which can carry sensitive bodies.
+        logger.error(
+            "Anthropic API error: status=%s type=%s request_id=%s",
+            getattr(exc, "status_code", "?"), type(exc).__name__, getattr(exc, "request_id", None),
+        )
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Error en el servicio de IA de Yemoda.")
+    except anthropic_sdk.APIConnectionError:
+        # Couldn't reach Anthropic at all (network/DNS/timeout). Distinct from an upstream error response.
+        logger.error("Anthropic connection error")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="No se pudo conectar con el proveedor de IA. Inténtalo de nuevo en un momento.",
+        )
 
     # Distinguish the chat surfaces (general / code_review / ai_fix) so each can be costed separately.
     log_usage(f"chat:{getattr(body, 'context_type', None) or 'general'}", model, response.usage.input_tokens, response.usage.output_tokens)
