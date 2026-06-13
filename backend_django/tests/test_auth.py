@@ -71,6 +71,10 @@ class TestRefresh:
         )
         access_token = login.data["access_token"]
 
+        # El login deja la cookie HttpOnly de refresh en el cliente y la vista la prefiere
+        # sobre el body; bórrala para ejercitar el fallback por body que valida este test.
+        api_client.cookies.clear()
+
         resp = api_client.post(
             "/api/auth/refresh/",
             {"refresh_token": access_token},

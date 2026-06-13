@@ -22,6 +22,7 @@ the column is populated.
 
 import logging
 import os
+import tempfile
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -39,6 +40,19 @@ MODEL_PATH = MODEL_DIR / "elasticnet_risk.joblib"
 SCALER_PATH = MODEL_DIR / "scaler.joblib"
 
 MIN_TRAINING_PROJECTS = 3
+
+# Project lifecycle statuses (Django's Project.STATUS_CHOICES) that count as "completed" for
+# training. Cancelled/Retired are excluded on purpose: their real end date doesn't reflect a
+# delivery delay, so they would only add label noise.
+_COMPLETED_PROJECT_STATUSES: tuple[str, ...] = ("Finished",)
+
+# Predicted delays within this many days of the deadline are treated as on-track: a regression
+# output of "+1 day" is well inside the model's error bar and must not raise an alarm.
+_AT_RISK_GRACE_DAYS = 2.0
+
+# Upper bound for the burndown projection (10 years). A near-zero velocity with many points
+# remaining would otherwise overflow date.fromordinal() and 500 the endpoint.
+_MAX_PROJECTED_DAYS = 3650
 
 # In-process cache of the loaded (model, scaler) keyed by the files' modification times, so we
 # don't joblib.load() from disk on every prediction. Invalidated automatically when the mtimes
@@ -76,24 +90,34 @@ def _extract_features(db: Session, project_id: int, reference_date: date | None 
 
     end_date = project_row[0]
     project_created_at = project_row[1]
-    days_remaining = (end_date - ref).days if end_date else None
+    if end_date is None:
+        # Without a deadline there is nothing to predict against: days_remaining would be
+        # meaningless (a 0 here read as "deadline is today" and flagged healthy projects as
+        # at-risk). Callers surface this as a 404 with a clear message.
+        return None
+    days_remaining = (end_date - ref).days
 
     # ── Task aggregates ───────────────────────────────────────────────────────
     # COALESCE(scrum_number, 1): defaults to 1 point when column is NULL / not yet added.
     # Only LEAF tasks (no subtasks) contribute points — a parent task's points are the
     # sum of its leaves, so counting both would double-count. The NOT EXISTS clause
     # restricts the point sums to leaves while task COUNTs still cover everything.
+    # Every "completed" filter is bounded by completed_at <= :ref_ts: when training on a
+    # historical snapshot, a task finished AFTER the snapshot date was still open at that
+    # point in time — counting it leaked future information into the training features.
     tasks_row = db.execute(
         text("""
             SELECT
                 COUNT(*)                                                        AS total_tasks,
-                COUNT(*) FILTER (WHERE completed_at IS NOT NULL)                AS completed_tasks,
+                COUNT(*) FILTER (WHERE completed_at IS NOT NULL
+                                   AND completed_at <= :ref_ts)                 AS completed_tasks,
                 COALESCE(SUM(COALESCE(scrum_number, 1)) FILTER (
                     WHERE NOT EXISTS (
                         SELECT 1 FROM task c WHERE c.id_parent_task = task.id_task
                     )), 0)                                                      AS total_points,
                 COALESCE(SUM(COALESCE(scrum_number, 1)) FILTER (
                     WHERE completed_at IS NOT NULL
+                      AND completed_at <= :ref_ts
                       AND NOT EXISTS (
                         SELECT 1 FROM task c WHERE c.id_parent_task = task.id_task
                     )), 0)                                                      AS completed_points
@@ -205,7 +229,7 @@ def _extract_features(db: Session, project_id: int, reference_date: date | None 
         "velocity_trend": velocity_trend,
         "sprint_consistency": sprint_consistency,
         "points_remaining": points_remaining,
-        "days_remaining": float(days_remaining) if days_remaining is not None else 0.0,
+        "days_remaining": float(days_remaining),
         "completion_rate": completion_rate,
         "tasks_in_progress": float(tasks_in_progress),
     }
@@ -237,11 +261,15 @@ def _rule_based_prediction(features: dict) -> dict:
     if effective_velocity <= 0:
         days_to_finish = float("inf")
     else:
-        days_to_finish = features["points_remaining"] / effective_velocity
+        # Cap the projection: a tiny velocity with many points left can project centuries
+        # ahead, which overflows date.fromordinal() below.
+        days_to_finish = min(
+            features["points_remaining"] / effective_velocity, float(_MAX_PROJECTED_DAYS)
+        )
 
     days_remaining = features["days_remaining"]
     days_delay = days_to_finish - days_remaining
-    at_risk = days_delay > 0
+    at_risk = days_delay > _AT_RISK_GRACE_DAYS
 
     predicted_end = None
     if days_to_finish != float("inf"):
@@ -267,13 +295,16 @@ def _get_training_data(db: Session) -> tuple[np.ndarray, np.ndarray] | None:
     Build training dataset from completed projects.
     Label: actual_delay_days (positive = delivered late, negative = early).
     """
+    # Match Django's real lifecycle values (Project.STATUS_CHOICES stores "Finished", not
+    # "closed" — the old filter never matched a single row, so the model could never train).
     completed_projects = db.execute(
         text("""
             SELECT id_project, end_date, created_at
             FROM project
             WHERE end_date IS NOT NULL
-              AND status = 'closed'
+              AND status = ANY(:statuses)
         """),
+        {"statuses": list(_COMPLETED_PROJECT_STATUSES)},
     ).fetchall()
 
     if len(completed_projects) < MIN_TRAINING_PROJECTS:
@@ -347,19 +378,24 @@ def train_model(db: Session) -> dict:
     )
     model.fit(X_scaled, y)
 
-    MODEL_DIR.mkdir(parents=True, exist_ok=True)
-    joblib.dump(model, MODEL_PATH)
-    joblib.dump(scaler, SCALER_PATH)
+    _dump_model_atomic(model, scaler)
 
     # Invalidate the in-process cache so the next prediction reloads the freshly trained files.
     global _MODEL_CACHE, _MODEL_CACHE_KEY
     _MODEL_CACHE = None
     _MODEL_CACHE_KEY = None
 
+    # r2_score is computed ON THE TRAINING SET (with this few samples it trends to 1.0 and
+    # says nothing about generalization). cv_mse is the honest signal: the best mean
+    # cross-validated MSE (in days²) across the alpha/l1_ratio grid ElasticNetCV searched.
+    train_r2 = model.score(X_scaled, y)
+    cv_mse = float(np.min(np.mean(model.mse_path_, axis=-1)))
+
     logger.info(
-        "Model trained on %d projects. R²=%.3f, alpha=%.4f, l1_ratio=%.2f",
+        "Model trained on %d projects. train R²=%.3f, CV MSE=%.2f days², alpha=%.4f, l1_ratio=%.2f",
         len(X),
-        model.score(X_scaled, y),
+        train_r2,
+        cv_mse,
         model.alpha_,
         model.l1_ratio_,
     )
@@ -367,10 +403,33 @@ def train_model(db: Session) -> dict:
     return {
         "status": "trained",
         "samples": len(X),
-        "r2_score": round(model.score(X_scaled, y), 4),
+        "r2_score": round(train_r2, 4),
+        "cv_mse": round(cv_mse, 2),
         "alpha": round(float(model.alpha_), 6),
         "l1_ratio": round(float(model.l1_ratio_), 3),
     }
+
+
+def _dump_model_atomic(model, scaler) -> None:
+    """Persist model + scaler with write-to-temp + atomic rename.
+
+    A plain joblib.dump() to the final path lets a concurrent predict read a half-written
+    file, and two overlapping trains could leave a model from one run paired with the scaler
+    of another (silently wrong predictions). os.replace() makes each file swap atomic.
+    """
+    MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    for obj, path in ((model, MODEL_PATH), (scaler, SCALER_PATH)):
+        fd, tmp_path = tempfile.mkstemp(dir=MODEL_DIR, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                joblib.dump(obj, fh)
+            os.replace(tmp_path, path)
+        except BaseException:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
 
 
 def _load_model() -> tuple | None:
@@ -400,7 +459,8 @@ def predict_risk(db: Session, project_id: int) -> dict | None:
     """
     Predict delay risk for a project.
 
-    Returns None if the project does not exist or has no tasks.
+    Returns None if the project does not exist, has no tasks, or has no end_date
+    (without a deadline there is no delay to predict).
     Otherwise returns:
       {
         at_risk: bool,
@@ -424,7 +484,9 @@ def predict_risk(db: Session, project_id: int) -> dict | None:
     X_scaled = scaler.transform(X)
 
     predicted_delay = float(model.predict(X_scaled)[0])
-    at_risk = predicted_delay > 0
+    # Grace band: a predicted delay of a day or two is inside the model's error bar — flagging
+    # it as "at risk" would make the signal noisy and erode trust in real alarms.
+    at_risk = predicted_delay > _AT_RISK_GRACE_DAYS
 
     days_remaining = features["days_remaining"]
     predicted_end_days = int(days_remaining + predicted_delay)

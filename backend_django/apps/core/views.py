@@ -539,6 +539,19 @@ class UserAccountViewSet(viewsets.ModelViewSet):
             raise PermissionDenied("Solo puedes editar tu propio perfil.")
         serializer.save()
 
+    @extend_schema(responses={200: UserAccountSerializer}, tags=["user-accounts"], summary="Cuenta del usuario autenticado")
+    @action(detail=False, methods=['get'], url_path='me', permission_classes=[IsAuthenticated])
+    def me(self, request):
+        """Return the authenticated user's own account.
+
+        The router maps detail routes as /user-accounts/<pk>/, so without this
+        explicit detail=False action a request to /user-accounts/me/ is treated
+        as a retrieve with pk="me" and 404s. The OAuth/Google sign-in flow calls
+        this right after issuing the token to resolve identity and role.
+        """
+        serializer = self.get_serializer(request.user)
+        return Response(serializer.data)
+
 
 class ProjectViewSet(viewsets.ModelViewSet):
     queryset = Project.objects.all()
@@ -591,7 +604,12 @@ class ProjectViewSet(viewsets.ModelViewSet):
     def perform_update(self, serializer):
         # Project creator/admin or a role with can_manage_project.
         require_perm(self.request.user, serializer.instance, "can_manage_project")
-        serializer.save()
+        old_status = serializer.instance.status
+        project = serializer.save()
+        # A project that just finished is a new training sample for the ML risk model —
+        # ask the FastAPI service to retrain (best-effort, never blocks the update).
+        if old_status != Project.FINISHED and project.status == Project.FINISHED:
+            _trigger_ml_training_async()
 
     def perform_destroy(self, instance):
         # Deleting a whole project stays creator/admin-only.
@@ -633,6 +651,63 @@ class ProjectViewSet(viewsets.ModelViewSet):
             "used": used,
             "remaining": {k: max(quota[k] - used[k], 0) for k in quota},
         })
+
+    @extend_schema(responses={200: dict}, tags=["projects"], summary="Predicción ML de riesgo de retraso del proyecto")
+    @action(detail=True, methods=['get'], url_path='risk')
+    def risk(self, request, pk=None):
+        """Delay-risk prediction, proxied to the internal ML service (FastAPI).
+
+        The /predictions/* endpoints are server-to-server only (X-Internal-Token), so this
+        is the user-facing surface: membership is enforced here via get_queryset.
+        """
+        project = self.get_object()  # get_queryset enforces membership
+
+        base = (settings.FASTAPI_CHAT_BASE_URL or "").rstrip("/")
+        if not base:
+            return Response(
+                {"detail": "El servicio de IA no está configurado (FASTAPI_CHAT_BASE_URL)."},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        try:
+            resp = requests.post(
+                f"{base}/predictions/project-risk/",
+                json={"project_id": project.id_project},
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Internal-Token": settings.FASTAPI_INTERNAL_TOKEN or "",
+                },
+                timeout=15,
+            )
+        except requests.RequestException:
+            return Response(
+                {"detail": "No se pudo contactar al servicio de predicción."},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        if resp.status_code == 404:
+            # The ML service answers 404 when there is nothing to predict on (no tasks or no
+            # end_date). The project itself exists, so surface it as a client-fixable 400.
+            return Response(
+                {
+                    "detail": "El proyecto no tiene tareas o no tiene fecha de entrega (end_date), no hay nada que predecir.",
+                    "code": "not_predictable",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if resp.status_code >= 400:
+            return Response(
+                {"detail": "El servicio de predicción rechazó la solicitud.", "status": resp.status_code},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        try:
+            return Response(resp.json())
+        except ValueError:
+            return Response(
+                {"detail": "Respuesta inválida del servicio de predicción."},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
 
 
 class RoleViewSet(viewsets.ReadOnlyModelViewSet):
@@ -3726,6 +3801,30 @@ def _drain_pending_reviews_async(project_id: int) -> None:
         requests.post(
             f"{base}/webhook/drain-pending/",
             json={"project_id": project_id},
+            headers={
+                "Content-Type": "application/json",
+                "X-Internal-Token": settings.FASTAPI_INTERNAL_TOKEN or "",
+            },
+            timeout=5,
+        )
+    except requests.RequestException:
+        pass
+
+
+def _trigger_ml_training_async() -> None:
+    """Best-effort: ask the FastAPI service to retrain the delay-risk model.
+
+    Called when a project transitions to Finished (one more training sample). The short
+    timeout only bounds OUR wait: the FastAPI handler keeps training server-side even if
+    this request times out, so the update flow is never blocked by a slow fit.
+    """
+    base = (settings.FASTAPI_CHAT_BASE_URL or "").rstrip("/")
+    if not base:
+        return
+    try:
+        requests.post(
+            f"{base}/predictions/train/",
+            json={},
             headers={
                 "Content-Type": "application/json",
                 "X-Internal-Token": settings.FASTAPI_INTERNAL_TOKEN or "",
