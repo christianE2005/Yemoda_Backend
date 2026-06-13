@@ -225,6 +225,12 @@ async def _call_yemoda(body: ChatRequest) -> dict:
     if body.context_type == "ai_fix":
         max_tokens = max(max_tokens, 16384)
 
+    # ai_fix debe emitir JSON parseable — la variedad de sampling solo estorba ahí; si el
+    # cliente no eligió temperatura explícitamente, se fija en 0 para ese contexto.
+    temperature = body.temperature
+    if body.context_type == "ai_fix" and "temperature" not in body.model_fields_set:
+        temperature = 0.0
+
     messages = [m.model_dump() for m in body.messages]
 
     # Anthropic separates the system prompt from the messages array
