@@ -4,6 +4,7 @@ AI Chat Router — server-side Anthropic (Claude) only.
 Uses the server's ANTHROPIC_API_KEY for every request. (The previous GitHub Copilot
 provider was removed; all chat now runs on Claude by default.)
 """
+import json
 import logging
 import os
 from typing import Literal
@@ -97,14 +98,54 @@ _SYSTEM_PROMPTS: dict[str, str] = {
         "Sé directo y constructivo."
     ),
     "ai_fix": (
-        "Eres un asistente de corrección de bugs y advertencias de código. "
-        "El usuario te proporcionará advertencias o errores detectados en su código. "
-        "Tu tarea es corregir el código y responder SIEMPRE en formato unified diff (git patch), "
-        "sin texto adicional fuera del diff. "
-        "Debes incluir encabezados 'diff --git', rutas a/b, y bloques '@@'. "
-        "Si no hay cambios necesarios, responde exactamente: NO_CHANGES."
+        "Eres un asistente de desarrollo que resuelve tareas y advertencias de código. "
+        "Puedes MODIFICAR archivos existentes y CREAR archivos nuevos cuando la solución lo requiera "
+        "(por ejemplo, generar un frontend que aún no existe en el repositorio). "
+        "Responde SIEMPRE con un único objeto JSON válido, sin texto fuera del JSON y sin fences de markdown, "
+        "con esta forma exacta:\n"
+        '{"files":[{"path":"ruta/relativa","action":"create|modify|delete","content":"contenido COMPLETO del archivo"}]}\n'
+        "Reglas: 'content' debe ser el contenido final completo del archivo (NO un diff ni fragmentos). "
+        "Para 'action':'delete' puedes omitir 'content'. Usa siempre rutas relativas a la raíz del repositorio. "
+        'Si no hay cambios necesarios, responde exactamente: {"files":[]}.'
     ),
 }
+
+# Notebooks and large files must be trimmed before they reach the model: a .ipynb is JSON with
+# base64 cell outputs that can be many MB, which blows past the model context window (Anthropic
+# then returns a 4xx that surfaces to the user as a 502). Cap each context field and strip
+# notebook outputs so only the source cells remain.
+_MAX_CONTEXT_FIELD_CHARS = 60_000
+
+
+def _truncate(text: str, limit: int = _MAX_CONTEXT_FIELD_CHARS) -> str:
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "\n\n... [truncado: contenido demasiado largo] ..."
+
+
+def _strip_notebook(content: str) -> str:
+    """Keep only the source of each cell, dropping outputs/metadata. Returns the input unchanged
+    if it is not parseable as a Jupyter notebook."""
+    try:
+        nb = json.loads(content)
+    except (ValueError, TypeError):
+        return content
+    if not isinstance(nb, dict) or not isinstance(nb.get("cells"), list):
+        return content
+    parts: list[str] = []
+    for cell in nb["cells"]:
+        if not isinstance(cell, dict):
+            continue
+        src = cell.get("source")
+        if isinstance(src, list):
+            src = "".join(str(s) for s in src)
+        elif not isinstance(src, str):
+            src = ""
+        if not src.strip():
+            continue
+        cell_type = cell.get("cell_type", "code")
+        parts.append(f"# ===== {cell_type} cell =====\n{src}")
+    return "\n\n".join(parts)
 
 
 def _build_system_message(context_type: str | None, context_data: dict | None) -> str:
@@ -139,10 +180,16 @@ def _build_system_message(context_type: str | None, context_data: dict | None) -
         if warnings_text:
             extras.append(f"Advertencias activas:\n{warnings_text}")
     if context_data.get("diff"):
-        extras.append(f"Diff:\n```diff\n{context_data['diff']}\n```")
+        extras.append(f"Diff:\n```diff\n{_truncate(str(context_data['diff']))}\n```")
     if context_data.get("file_content"):
         lang = context_data.get("language", "")
-        extras.append(f"Contenido del archivo:\n```{lang}\n{context_data['file_content']}\n```")
+        file_content = str(context_data["file_content"])
+        file_path = context_data.get("file_path")
+        # A notebook (.ipynb) is huge JSON with base64 outputs; keep only the source cells so the
+        # request fits the model context instead of failing upstream as a 502.
+        if isinstance(file_path, str) and file_path.lower().endswith(".ipynb"):
+            file_content = _strip_notebook(file_content)
+        extras.append(f"Contenido del archivo:\n```{lang}\n{_truncate(file_content)}\n```")
 
     if extras:
         return base + "\n\n### Contexto\n" + "\n".join(extras)
@@ -171,6 +218,12 @@ async def _call_yemoda(body: ChatRequest) -> dict:
             detail=f"Modelo '{model}' no disponible. Opciones: {sorted(_ANTHROPIC_MODELS)}",
         )
 
+    # ai_fix can return several full files (e.g. scaffolding a frontend from scratch), so give it
+    # room: the request default of 4096 truncates the JSON file-list and makes it unparseable.
+    max_tokens = body.max_tokens
+    if body.context_type == "ai_fix":
+        max_tokens = max(max_tokens, 16384)
+
     messages = [m.model_dump() for m in body.messages]
 
     # Anthropic separates the system prompt from the messages array
@@ -186,7 +239,7 @@ async def _call_yemoda(body: ChatRequest) -> dict:
     try:
         response = await client.messages.create(
             model=model,
-            max_tokens=body.max_tokens,
+            max_tokens=max_tokens,
             system=system_content,
             messages=anthropic_messages,
             temperature=body.temperature,
